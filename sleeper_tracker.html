@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sleeper League Tracker</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #0d0f14;
+    --surface: #13161e;
+    --card: #1a1e2a;
+    --border: #252a38;
+    --accent: #00e5a0;
+    --accent2: #ff6b35;
+    --muted: #4a5270;
+    --text: #e8eaf2;
+    --text2: #8890aa;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    min-height: 100vh;
+    background-image:
+      radial-gradient(ellipse 80% 40% at 50% -10%, rgba(0,229,160,0.07) 0%, transparent 70%);
+  }
+
+  header {
+    padding: 2rem 2rem 1rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+  }
+
+  header h1 {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 2.4rem;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+  }
+
+  header span {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--muted);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  .container { max-width: 1200px; margin: 0 auto; padding: 1.5rem 2rem; }
+
+  /* LEAGUE ID INPUT */
+  .setup-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+    display: flex;
+    gap: 1rem;
+    align-items: flex-end;
+    flex-wrap: wrap;
+  }
+
+  .input-group { display: flex; flex-direction: column; gap: 0.4rem; flex: 1; min-width: 200px; }
+  .input-group label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-family: 'DM Mono', monospace; }
+  .input-group input {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: 'DM Mono', monospace;
+    font-size: 0.9rem;
+    padding: 0.6rem 0.9rem;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .input-group input:focus { border-color: var(--accent); }
+
+  .btn {
+    background: var(--accent);
+    color: #000;
+    border: none;
+    border-radius: 8px;
+    padding: 0.65rem 1.4rem;
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 600;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.1s;
+    white-space: nowrap;
+  }
+  .btn:hover { opacity: 0.85; }
+  .btn:active { transform: scale(0.98); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* FILTERS */
+  .filters {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.2rem 1.5rem;
+    margin-bottom: 1.5rem;
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    align-items: flex-end;
+  }
+
+  .filter-group { display: flex; flex-direction: column; gap: 0.4rem; }
+  .filter-group label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-family: 'DM Mono', monospace; }
+  .filter-group select {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.85rem;
+    padding: 0.55rem 0.9rem;
+    outline: none;
+    cursor: pointer;
+    min-width: 140px;
+    transition: border-color 0.2s;
+  }
+  .filter-group select:focus { border-color: var(--accent); }
+
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .stat-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem 1.2rem;
+  }
+  .stat-card .label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-family: 'DM Mono', monospace; margin-bottom: 0.3rem; }
+  .stat-card .value { font-family: 'Bebas Neue', sans-serif; font-size: 2rem; color: var(--accent); line-height: 1; }
+  .stat-card .sub { font-size: 0.75rem; color: var(--text2); margin-top: 0.2rem; }
+
+  /* TABLE */
+  .table-wrap {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .table-header {
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .table-header h2 { font-family: 'Bebas Neue', sans-serif; font-size: 1.2rem; letter-spacing: 0.05em; color: var(--text); }
+  .table-header span { font-family: 'DM Mono', monospace; font-size: 0.75rem; color: var(--muted); }
+
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left;
+    padding: 0.7rem 1rem;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    font-family: 'DM Mono', monospace;
+    font-weight: 500;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  td {
+    padding: 0.75rem 1rem;
+    font-size: 0.85rem;
+    border-bottom: 1px solid rgba(37,42,56,0.5);
+    vertical-align: top;
+    line-height: 1.4;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+
+  .badge {
+    display: inline-block;
+    padding: 0.2rem 0.55rem;
+    border-radius: 4px;
+    font-size: 0.68rem;
+    font-family: 'DM Mono', monospace;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .badge-trade    { background: rgba(0,229,160,0.12); color: var(--accent); }
+  .badge-waiver   { background: rgba(255,107,53,0.12); color: var(--accent2); }
+  .badge-free_agent { background: rgba(100,120,255,0.12); color: #7c9fff; }
+
+  .player-list { display: flex; flex-direction: column; gap: 0.25rem; }
+  .player-item { font-size: 0.82rem; color: var(--text2); }
+  .player-item.highlight { color: var(--text); }
+
+  .team-name { font-weight: 600; color: var(--text); }
+  .season-tag { font-family: 'DM Mono', monospace; font-size: 0.75rem; color: var(--muted); }
+
+  .status { text-align: center; padding: 3rem; color: var(--muted); font-family: 'DM Mono', monospace; font-size: 0.85rem; }
+  .status.loading { color: var(--accent); }
+  .status.error { color: #ff5555; }
+
+  .progress-bar {
+    height: 2px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 0.5rem;
+  }
+  .progress-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+
+  .leaderboard { margin-bottom: 1.5rem; }
+  .lb-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.6rem 1.2rem;
+    border-bottom: 1px solid rgba(37,42,56,0.5);
+  }
+  .lb-row:last-child { border-bottom: none; }
+  .lb-rank { font-family: 'Bebas Neue', sans-serif; font-size: 1.1rem; color: var(--muted); width: 24px; }
+  .lb-rank.top { color: var(--accent); }
+  .lb-name { flex: 1; font-size: 0.88rem; font-weight: 500; }
+  .lb-bar-wrap { flex: 2; display: flex; align-items: center; gap: 0.75rem; }
+  .lb-bar { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+  .lb-fill { height: 100%; border-radius: 3px; background: var(--accent); transition: width 0.5s ease; }
+  .lb-count { font-family: 'DM Mono', monospace; font-size: 0.8rem; color: var(--text2); width: 36px; text-align: right; }
+
+  @media (max-width: 600px) {
+    header { padding: 1.2rem 1rem 0.8rem; }
+    .container { padding: 1rem; }
+    td, th { padding: 0.6rem 0.75rem; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Sleeper Tracker</h1>
+  <span>Dynasty League Activity</span>
+</header>
+
+<div class="container">
+
+  <div class="setup-card">
+    <div class="input-group">
+      <label>League ID</label>
+      <input type="text" id="leagueInput" placeholder="e.g. 1313212931764142080" value="1313212931764142080" />
+    </div>
+    <button class="btn" id="loadBtn" onclick="loadLeague()">Load League</button>
+  </div>
+
+  <div id="progressWrap" style="display:none; margin-bottom:1.5rem;">
+    <div style="font-family:'DM Mono',monospace; font-size:0.8rem; color:var(--accent); margin-bottom:0.4rem;" id="progressLabel">Loading...</div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+  </div>
+
+  <div id="mainContent" style="display:none;">
+
+    <div class="filters">
+      <div class="filter-group">
+        <label>Season</label>
+        <select id="filterSeason" onchange="applyFilters()">
+          <option value="all">All Seasons</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label>Manager</label>
+        <select id="filterManager" onchange="applyFilters()">
+          <option value="all">All Managers</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label>Move Type</label>
+        <select id="filterType" onchange="applyFilters()">
+          <option value="all">All Types</option>
+          <option value="trade">Trades</option>
+          <option value="waiver">Waivers</option>
+          <option value="free_agent">Free Agent</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="stats-row" id="statsRow"></div>
+
+    <div class="table-wrap leaderboard" id="leaderboardWrap">
+      <div class="table-header">
+        <h2>Activity Leaderboard</h2>
+        <span id="leaderboardLabel"></span>
+      </div>
+      <div id="leaderboardBody"></div>
+    </div>
+
+    <div class="table-wrap">
+      <div class="table-header">
+        <h2>Transaction Log</h2>
+        <span id="txnCount"></span>
+      </div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>Season</th>
+              <th>Wk</th>
+              <th>Type</th>
+              <th>Manager</th>
+              <th>Added</th>
+              <th>Dropped / Sent</th>
+            </tr>
+          </thead>
+          <tbody id="txnBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
+  <div id="emptyState" class="status">Enter your League ID above and click Load League</div>
+
+</div>
+
+<script>
+const BASE = "https://api.sleeper.app/v1";
+let allTxns = [];
+let allManagers = {};   // uid → current display name
+let allPlayers = {};
+
+async function api(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`API error: ${r.status} ${url}`);
+  return r.json();
+}
+
+function setProgress(pct, label) {
+  document.getElementById('progressFill').style.width = pct + '%';
+  document.getElementById('progressLabel').textContent = label;
+}
+
+async function loadLeague() {
+  const leagueId = document.getElementById('leagueInput').value.trim();
+  if (!leagueId) return;
+
+  document.getElementById('loadBtn').disabled = true;
+  document.getElementById('mainContent').style.display = 'none';
+  document.getElementById('emptyState').style.display = 'none';
+  document.getElementById('progressWrap').style.display = 'block';
+  allTxns = [];
+
+  try {
+    setProgress(5, 'Loading player data...');
+    if (Object.keys(allPlayers).length === 0) {
+      allPlayers = await api(`${BASE}/players/nfl`);
+    }
+
+    setProgress(15, 'Fetching league history...');
+    const seasons = await getAllSeasons(leagueId);
+    const totalSeasons = seasons.length;
+
+    // Get current managers for canonical names
+    const currentUsers = await api(`${BASE}/league/${leagueId}/users`);
+    allManagers = {};
+    currentUsers.forEach(u => { allManagers[u.user_id] = u.display_name || u.user_id; });
+
+    for (let si = 0; si < seasons.length; si++) {
+      const [season, lid] = seasons[si];
+      const basePct = 20 + (si / totalSeasons) * 70;
+      setProgress(basePct, `Loading ${season} season...`);
+
+      const [ridToUid, uidToName] = await getIdMaps(lid);
+
+      for (let week = 1; week <= 18; week++) {
+        const txns = await api(`${BASE}/league/${lid}/transactions/${week}`);
+        if (!txns || !txns.length) continue;
+
+        for (const txn of txns) {
+          if (txn.status !== 'complete') continue;
+          const type = txn.type;
+          const rids = txn.roster_ids || [];
+
+          for (const rid of rids) {
+            const uid = ridToUid[rid];
+            const managerName = uidToName[uid] || `Roster ${rid}`;
+            const canonicalName = allManagers[uid] || managerName;
+
+            const adds  = txn.adds  || {};
+            const drops = txn.drops || {};
+            const picks = txn.draft_picks || [];
+
+            const added   = Object.entries(adds).filter(([,r]) => r === rid).map(([pid]) => playerName(pid));
+            const dropped = Object.entries(drops).filter(([,r]) => r === rid).map(([pid]) => playerName(pid));
+
+            picks.forEach(p => {
+              const desc = `${p.season} Rd ${p.round} pick`;
+              if (p.owner_id === rid) added.push(desc);
+              else if (p.previous_owner_id === rid) dropped.push(desc);
+            });
+
+            // For trades deduplicate by transaction id + roster
+            allTxns.push({
+              season,
+              week,
+              type,
+              uid,
+              managerName,
+              canonicalName,
+              added,
+              dropped,
+              txnId: txn.transaction_id,
+              with: rids.filter(r => r !== rid).map(r => uidToName[ridToUid[r]] || `Roster ${r}`)
+            });
+          }
+        }
+      }
+    }
+
+    setProgress(100, 'Done!');
+    setTimeout(() => {
+      document.getElementById('progressWrap').style.display = 'none';
+      populateFilters();
+      applyFilters();
+      document.getElementById('mainContent').style.display = 'block';
+    }, 300);
+
+  } catch (e) {
+    document.getElementById('progressLabel').style.color = '#ff5555';
+    document.getElementById('progressLabel').textContent = 'Error: ' + e.message;
+    console.error(e);
+  } finally {
+    document.getElementById('loadBtn').disabled = false;
+  }
+}
+
+async function getAllSeasons(leagueId) {
+  const seasons = [];
+  let lid = leagueId;
+  while (lid) {
+    const info = await api(`${BASE}/league/${lid}`);
+    seasons.push([info.season || 'Unknown', lid]);
+    lid = info.previous_league_id || null;
+  }
+  return seasons.sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+async function getIdMaps(leagueId) {
+  const [users, rosters] = await Promise.all([
+    api(`${BASE}/league/${leagueId}/users`),
+    api(`${BASE}/league/${leagueId}/rosters`)
+  ]);
+  const uidToName = {};
+  users.forEach(u => { uidToName[u.user_id] = u.display_name || u.user_id; });
+  const ridToUid = {};
+  rosters.forEach(r => { ridToUid[r.roster_id] = r.owner_id; });
+  return [ridToUid, uidToName];
+}
+
+function playerName(pid) {
+  const p = allPlayers[String(pid)];
+  if (!p) return `ID:${pid}`;
+  const name = `${p.first_name || ''} ${p.last_name || ''}`.trim();
+  const pos  = p.position || '';
+  const team = p.team || '';
+  return `${name}${pos ? ` (${pos}${team ? ' - '+team : ''})` : ''}`;
+}
+
+function populateFilters() {
+  const seasons  = [...new Set(allTxns.map(t => t.season))].sort();
+  const managers = [...new Set(allTxns.map(t => t.canonicalName))].sort();
+
+  const sEl = document.getElementById('filterSeason');
+  sEl.innerHTML = '<option value="all">All Seasons</option>';
+  seasons.forEach(s => { sEl.innerHTML += `<option value="${s}">${s}</option>`; });
+
+  const mEl = document.getElementById('filterManager');
+  mEl.innerHTML = '<option value="all">All Managers</option>';
+  managers.forEach(m => { mEl.innerHTML += `<option value="${m}">${m}</option>`; });
+}
+
+function applyFilters() {
+  const season  = document.getElementById('filterSeason').value;
+  const manager = document.getElementById('filterManager').value;
+  const type    = document.getElementById('filterType').value;
+
+  let filtered = allTxns;
+  if (season  !== 'all') filtered = filtered.filter(t => t.season === season);
+  if (manager !== 'all') filtered = filtered.filter(t => t.canonicalName === manager);
+  if (type    !== 'all') filtered = filtered.filter(t => t.type === type);
+
+  renderStats(filtered);
+  renderLeaderboard(filtered);
+  renderTable(filtered);
+}
+
+function renderStats(txns) {
+  const trades  = txns.filter(t => t.type === 'trade').length;
+  const waivers = txns.filter(t => t.type === 'waiver').length;
+  const fas     = txns.filter(t => t.type === 'free_agent').length;
+  const managers = new Set(txns.map(t => t.canonicalName)).size;
+
+  document.getElementById('statsRow').innerHTML = `
+    <div class="stat-card"><div class="label">Total Moves</div><div class="value">${txns.length}</div></div>
+    <div class="stat-card"><div class="label">Trades</div><div class="value" style="color:var(--accent)">${trades}</div></div>
+    <div class="stat-card"><div class="label">Waivers</div><div class="value" style="color:var(--accent2)">${waivers}</div></div>
+    <div class="stat-card"><div class="label">Free Agent</div><div class="value" style="color:#7c9fff">${fas}</div></div>
+    <div class="stat-card"><div class="label">Managers</div><div class="value" style="color:var(--text2)">${managers}</div></div>
+  `;
+}
+
+function renderLeaderboard(txns) {
+  const counts = {};
+  txns.forEach(t => { counts[t.canonicalName] = (counts[t.canonicalName] || 0) + 1; });
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  const max = sorted[0]?.[1] || 1;
+
+  document.getElementById('leaderboardLabel').textContent = `${sorted.length} managers`;
+  document.getElementById('leaderboardBody').innerHTML = sorted.map(([name, count], i) => `
+    <div class="lb-row">
+      <div class="lb-rank ${i < 3 ? 'top' : ''}">${i + 1}</div>
+      <div class="lb-name">${name}</div>
+      <div class="lb-bar-wrap">
+        <div class="lb-bar"><div class="lb-fill" style="width:${(count/max)*100}%"></div></div>
+        <div class="lb-count">${count}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderTable(txns) {
+  document.getElementById('txnCount').textContent = `${txns.length} transactions`;
+
+  const typeLabel = { trade: 'Trade', waiver: 'Waiver', free_agent: 'FA' };
+  const badgeClass = { trade: 'badge-trade', waiver: 'badge-waiver', free_agent: 'badge-free_agent' };
+
+  // Show most recent first
+  const sorted = [...txns].reverse();
+
+  document.getElementById('txnBody').innerHTML = sorted.map(t => `
+    <tr>
+      <td><span class="season-tag">${t.season}</span></td>
+      <td><span class="season-tag">${t.week}</span></td>
+      <td><span class="badge ${badgeClass[t.type] || ''}">${typeLabel[t.type] || t.type}</span></td>
+      <td>
+        <div class="team-name">${t.canonicalName}</div>
+        ${t.type === 'trade' && t.with.length ? `<div style="font-size:0.75rem;color:var(--muted);margin-top:0.2rem;">vs ${t.with.join(', ')}</div>` : ''}
+      </td>
+      <td>
+        <div class="player-list">
+          ${t.added.length ? t.added.map(p => `<div class="player-item highlight">+ ${p}</div>`).join('') : '<div class="player-item">—</div>'}
+        </div>
+      </td>
+      <td>
+        <div class="player-list">
+          ${t.dropped.length ? t.dropped.map(p => `<div class="player-item">− ${p}</div>`).join('') : '<div class="player-item">—</div>'}
+        </div>
+      </td>
+    </tr>
+  `).join('');
+}
+</script>
+</body>
+</html>
