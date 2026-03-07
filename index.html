@@ -476,7 +476,7 @@
 
 <script>
 const BASE = "https://api.sleeper.app/v1";
-const SUPABASE_URL = 'https://whezphfjymwyjxxmpzgx.supabase.co';
+const SUPABASE_URL      = 'https://whezphfjymwyjxxmpzgx.supabase.co';
 const SUPABASE_EDGE_URL = 'https://whezphfjymwyjxxmpzgx.supabase.co/functions/v1/rapid-api';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndoZXpwaGZqeW13eWp4eG1wemd4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI4NDAyODIsImV4cCI6MjA4ODQxNjI4Mn0.ngJTXg78P4-w8pOg8nxY2T18yYAQ-fxw4CrbzW0ylQQ';
 let allTxns = [];
@@ -485,6 +485,8 @@ let allPlayers = {};
 let allTrades = [];
 let aiGradeCache = {};     // txnId → { sideA, sideB, overallVerdict, longTermWatch }
 let renderedTradeIds = []; // ordered list of txnIds for current render
+const seasonStatsCache = {}; // "playerId_season" → { ppg, games, totalPts, vsAvgPct }
+const weekStatsCache = {};   // "season_week" → { playerId: pts_ppr }
 
 // ─── UTILS ──────────────────────────────────────────────────────────────────
 async function api(url) {
@@ -655,6 +657,70 @@ function playerAge(pid) {
   return Math.floor((Date.now() - birth) / (365.25*24*60*60*1000));
 }
 
+// ─── STATS FETCHING ──────────────────────────────────────────────────────────
+async function fetchWeekStats(season, week) {
+  const key = `${season}_${week}`;
+  if (weekStatsCache[key]) return weekStatsCache[key];
+  try {
+    const data = await api(`${BASE}/stats/nfl/regular/${season}/${week}`);
+    const simplified = {};
+    for (const [pid, stats] of Object.entries(data || {})) {
+      if (stats.pts_ppr > 0) simplified[pid] = stats.pts_ppr;
+    }
+    weekStatsCache[key] = simplified;
+    return simplified;
+  } catch {
+    weekStatsCache[key] = {};
+    return {};
+  }
+}
+
+async function getPositionalAvg(season, upToWeek, pos) {
+  // Aggregate totals across all weeks up to tradeWeek
+  const posPoints = {}; // pid → total pts
+  for (let w = 1; w <= upToWeek; w++) {
+    const stats = await fetchWeekStats(season, w);
+    for (const [pid, pts] of Object.entries(stats)) {
+      if (allPlayers[pid]?.position === pos) {
+        posPoints[pid] = (posPoints[pid] || 0) + pts;
+      }
+    }
+  }
+  const totals = Object.values(posPoints).sort((a, b) => b - a);
+  const cutoff = (pos === 'QB' || pos === 'TE') ? 14 : 28;
+  const starters = totals.slice(0, cutoff);
+  if (!starters.length) return 0;
+  // Return average PPG across starters (divide by weeks played, approx upToWeek)
+  const avgTotal = starters.reduce((a, b) => a + b, 0) / starters.length;
+  return avgTotal / upToWeek; // per-week average
+}
+
+async function fetchPlayerStats(pid, season, tradeWeek) {
+  const cacheKey = `${pid}_${season}_${tradeWeek}`;
+  if (seasonStatsCache[cacheKey]) return seasonStatsCache[cacheKey];
+
+  let totalPts = 0;
+  let games = 0;
+
+  for (let w = 1; w <= tradeWeek; w++) {
+    const stats = await fetchWeekStats(season, w);
+    const pts = stats[String(pid)];
+    if (pts > 0) {
+      totalPts += pts;
+      games++;
+    }
+  }
+
+  const ppg = games > 0 ? totalPts / games : 0;
+  const pos = playerPos(pid);
+  const posAvgPPG = pos ? await getPositionalAvg(season, tradeWeek, pos) : 0;
+  const vsAvgPct = posAvgPPG > 0 ? Math.round(((ppg - posAvgPPG) / posAvgPPG) * 100) : null;
+
+  const result = { totalPts: +totalPts.toFixed(1), games, ppg: +ppg.toFixed(1), vsAvgPct };
+  seasonStatsCache[cacheKey] = result;
+  return result;
+}
+
 // ─── AI TRADE GRADING ────────────────────────────────────────────────────────
 const SYSTEM_PROMPT = `You are an expert dynasty fantasy football trade analyzer for a 14-team PPR league with standard lineups (1 QB, 1 RB, 1 WR, 1 TE, 1 FLEX). No Superflex. No TE Premium.
 
@@ -708,14 +774,22 @@ Respond ONLY in the following JSON format with no preamble or markdown:
   "longTermWatch": "<1 sentence on what to monitor in 1-2 years>"
 }`;
 
-function buildTradePrompt(trade) {
+function buildTradePrompt(trade, statsMap = {}) {
   const lines = ['Analyze this dynasty trade:\n'];
   trade.sides.forEach((side, i) => {
     const label = i === 0 ? 'SIDE A' : 'SIDE B';
     lines.push(`${label} — ${side.name} receives:`);
     side.players.forEach(pid => {
       const age = playerAge(pid);
-      lines.push(`- ${playerName(pid)}, ${playerPos(pid)}, ${playerTeam(pid) || 'FA'}${age ? `, Age ${age}` : ''}`);
+      const stats = statsMap[pid];
+      let statStr = 'No stats available';
+      if (stats && stats.games > 0) {
+        const vsStr = stats.vsAvgPct !== null
+          ? ` ${stats.vsAvgPct >= 0 ? '+' : ''}${stats.vsAvgPct}% vs ${playerPos(pid)} avg`
+          : '';
+        statStr = `${stats.ppg} PPG, ${stats.games} games${vsStr}`;
+      }
+      lines.push(`- ${playerName(pid)}, ${playerPos(pid)}, ${playerTeam(pid) || 'FA'}${age ? `, Age ${age}` : ''} | ${statStr}`);
     });
     side.picks.forEach(p => {
       lines.push(`- ${p.season} Rd${p.round} pick (source: ${p.previous_owner_id ? 'known team' : 'source unknown'})`);
@@ -730,6 +804,13 @@ async function analyzeTradeWithAI(trade) {
   const cacheKey = String(trade.txnId);
   if (aiGradeCache[cacheKey]) return aiGradeCache[cacheKey];
 
+  // Fetch real stats for every player involved, up to the week of the trade
+  const allPids = trade.sides.flatMap(s => s.players);
+  const statsMap = {};
+  await Promise.all(allPids.map(async pid => {
+    statsMap[pid] = await fetchPlayerStats(pid, trade.season, trade.week);
+  }));
+
   const response = await fetch(SUPABASE_EDGE_URL, {
     method: 'POST',
     headers: {
@@ -738,7 +819,7 @@ async function analyzeTradeWithAI(trade) {
     },
     body: JSON.stringify({
       txnId: cacheKey,
-      tradePrompt: buildTradePrompt(trade)
+      tradePrompt: buildTradePrompt(trade, statsMap)
     })
   });
 
