@@ -476,7 +476,9 @@
 
 <script>
 const BASE = "https://api.sleeper.app/v1";
-const ANTHROPIC_API = "https://api.anthropic.com/v1/messages";
+const SUPABASE_URL = 'https://whezphfjymwyjxxmpzgx.supabase.co';
+const SUPABASE_EDGE_URL = 'https://whezphfjymwyjxxmpzgx.supabase.co/functions/v1/analyze-trade';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndoZXpwaGZqeW13eWp4eG1wemd4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI4NDAyODIsImV4cCI6MjA4ODQxNjI4Mn0.ngJTXg78P4-w8pOg8nxY2T18yYAQ-fxw4CrbzW0ylQQ';
 let allTxns = [];
 let allManagers = {};
 let allPlayers = {};
@@ -728,26 +730,24 @@ async function analyzeTradeWithAI(trade) {
   const cacheKey = String(trade.txnId);
   if (aiGradeCache[cacheKey]) return aiGradeCache[cacheKey];
 
-  const userMsg = buildTradePrompt(trade);
-
-  const response = await fetch(ANTHROPIC_API, {
+  const response = await fetch(SUPABASE_EDGE_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + SUPABASE_ANON_KEY
+    },
     body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 1000,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: userMsg }]
+      txnId: cacheKey,
+      tradePrompt: buildTradePrompt(trade)
     })
   });
 
-  if (!response.ok) throw new Error(`AI API error: ${response.status}`);
+  if (!response.ok) throw new Error(`Edge Function error: ${response.status}`);
   const data = await response.json();
-  const text = data.content?.find(b => b.type === 'text')?.text || '';
-  const clean = text.replace(/```json|```/g, '').trim();
-  const result = JSON.parse(clean);
-  aiGradeCache[cacheKey] = result;
-  return result;
+  if (data.error) throw new Error(data.error);
+
+  aiGradeCache[cacheKey] = data.result;
+  return data.result;
 }
 
 // ─── RENDER TRADE GRADES ─────────────────────────────────────────────────────
