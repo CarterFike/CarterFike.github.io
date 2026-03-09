@@ -475,20 +475,55 @@
 </div>
 
 <script>
-const BASE = "https://api.sleeper.app/v1";
-const SUPABASE_URL      = 'https://whezphfjymwyjxxmpzgx.supabase.co';
+const BASE            = "https://api.sleeper.app/v1";
+const FC_URL          = "https://api.fantasycalc.com/values/current?isDynasty=true&numQbs=1&ppr=1&numTeams=14";
+const SUPABASE_URL    = 'https://whezphfjymwyjxxmpzgx.supabase.co';
 const SUPABASE_EDGE_URL = 'https://whezphfjymwyjxxmpzgx.supabase.co/functions/v1/rapid-api';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndoZXpwaGZqeW13eWp4eG1wemd4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI4NDAyODIsImV4cCI6MjA4ODQxNjI4Mn0.ngJTXg78P4-w8pOg8nxY2T18yYAQ-fxw4CrbzW0ylQQ';
-let allTxns = [];
-let allManagers = {};
-let allPlayers = {};
-let allTrades = [];
-let aiGradeCache = {};     // txnId → { sideA, sideB, overallVerdict, longTermWatch }
-let renderedTradeIds = []; // ordered list of txnIds for current render
-const seasonStatsCache = {}; // "playerId_season" → { ppg, games, totalPts, vsAvgPct }
-const weekStatsCache = {};   // "season_week" → { playerId: pts_ppr }
 
-// ─── UTILS ──────────────────────────────────────────────────────────────────
+// ─── GLOBALS ─────────────────────────────────────────────────────────────────
+let allTxns      = [];
+let allManagers  = {};
+let allPlayers   = {};
+let allTrades    = [];
+let aiGradeCache = {};      // txnId → AI result
+let renderedTradeIds = [];
+
+const seasonStatsCache   = {}; // `${pid}_${season}_${week}` → stats
+const weekStatsCache     = {}; // `${season}_${week}` → { pid: pts_ppr }
+let   fcValues           = {}; // sleeperId → { value, overallRank, positionRank, trend30Day }
+let   rosterState        = {}; // rid(string) → Set of player_ids(string)
+let   rosterSnapshotCache = {}; // txnId → snapshot.snapshots object
+let   existingSnapshotIds = new Set();
+
+// ─── SUPABASE REST HELPERS ───────────────────────────────────────────────────
+async function sbSelect(table, filter) {
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}&select=*`, {
+      headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY }
+    });
+    if (!r.ok) return [];
+    return r.json();
+  } catch { return []; }
+}
+
+async function sbUpsert(table, data) {
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+        'Content-Type': 'application/json',
+        'Prefer': 'resolution=merge-duplicates,return=minimal'
+      },
+      body: JSON.stringify(data)
+    });
+    return r.ok;
+  } catch { return false; }
+}
+
+// ─── UTILS ───────────────────────────────────────────────────────────────────
 async function api(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`${r.status} ${url}`);
@@ -499,47 +534,274 @@ function setProgress(pct, label) {
   document.getElementById('progressLabel').textContent = label;
 }
 
-// ─── TABS ────────────────────────────────────────────────────────────────────
+// ─── TABS ─────────────────────────────────────────────────────────────────────
 function switchTab(name) {
-  document.querySelectorAll('.tab').forEach((t,i) => {
-    const names = ['activity','trades'];
-    t.classList.toggle('active', names[i] === name);
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    t.classList.toggle('active', ['activity','trades'][i] === name);
   });
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-  document.getElementById('panel-'+name).classList.add('active');
+  document.getElementById('panel-' + name).classList.add('active');
 }
 
-// ─── LOAD LEAGUE ─────────────────────────────────────────────────────────────
+// ─── FANTASYCALC ─────────────────────────────────────────────────────────────
+async function fetchFCValues() {
+  try {
+    const data = await fetch(FC_URL).then(r => r.json());
+    fcValues = {};
+    data.forEach(entry => {
+      const sid = entry.player?.sleeperId;
+      if (sid) {
+        fcValues[String(sid)] = {
+          value:        entry.value        || 0,
+          overallRank:  entry.overallRank  || null,
+          positionRank: entry.positionRank || null,
+          trend30Day:   entry.trend30Day   || 0
+        };
+      }
+    });
+  } catch (e) {
+    console.warn('FantasyCalc fetch failed, values will be unavailable:', e.message);
+  }
+}
+
+function getFCValue(pid) {
+  return fcValues[String(pid)]?.value || 0;
+}
+
+// ─── ROSTER STATE ─────────────────────────────────────────────────────────────
+async function seedRosterFromDraft(firstLeagueId) {
+  // Initialize an empty set for every known roster in the first season
+  try {
+    const rosters = await api(`${BASE}/league/${firstLeagueId}/rosters`);
+    rosters.forEach(r => {
+      rosterState[String(r.roster_id)] = new Set();
+    });
+  } catch (e) {
+    console.warn('Could not load rosters for seeding:', e.message);
+  }
+
+  // Find the startup draft and apply picks
+  try {
+    const drafts = await api(`${BASE}/league/${firstLeagueId}/drafts`);
+    if (!drafts?.length) return;
+    // Prefer completed drafts; fall back to first
+    const startup = drafts.find(d => d.status === 'complete') || drafts[0];
+    if (!startup) return;
+    const picks = await api(`${BASE}/draft/${startup.draft_id}/picks`);
+    picks.forEach(pick => {
+      const rid = String(pick.roster_id);
+      if (!rosterState[rid]) rosterState[rid] = new Set();
+      rosterState[rid].add(String(pick.player_id));
+    });
+  } catch (e) {
+    console.warn('Startup draft seed failed:', e.message);
+  }
+}
+
+function applyTxnToRosterState(txn) {
+  const drops = txn.drops || {};
+  const adds  = txn.adds  || {};
+  Object.entries(drops).forEach(([pid, rid]) => {
+    const r = String(rid);
+    if (rosterState[r]) rosterState[r].delete(String(pid));
+  });
+  Object.entries(adds).forEach(([pid, rid]) => {
+    const r = String(rid);
+    if (!rosterState[r]) rosterState[r] = new Set();
+    rosterState[r].add(String(pid));
+  });
+}
+
+function computeStarterValues(players) {
+  // Optimal lineup: QB1 RB1 WR1 TE1 FLEX(best remaining RB/WR/TE)
+  const byPos = { QB: [], RB: [], WR: [], TE: [] };
+  players.forEach(pid => {
+    const pos = playerPos(pid);
+    if (byPos[pos]) byPos[pos].push({ pid, val: getFCValue(pid) });
+  });
+  Object.keys(byPos).forEach(pos => byPos[pos].sort((a, b) => b.val - a.val));
+
+  const sv = { QB: 0, RB: 0, WR: 0, TE: 0, FLEX: 0 };
+  const used = new Set();
+  ['QB','RB','WR','TE'].forEach(pos => {
+    const best = byPos[pos][0];
+    if (best) { sv[pos] = best.val; used.add(best.pid); }
+  });
+  const flexCands = ['RB','WR','TE']
+    .flatMap(pos => byPos[pos].filter(p => !used.has(p.pid)))
+    .sort((a, b) => b.val - a.val);
+  sv.FLEX = flexCands[0]?.val || 0;
+  return sv;
+}
+
+function buildSnapshotForTrade(leagueId, trade, ridToUid, uidToName) {
+  // Compute every team's total and starter values at this moment
+  const allTeamData = {};
+  for (const [rid, playerSet] of Object.entries(rosterState)) {
+    const players = [...playerSet];
+    const total   = players.reduce((s, pid) => s + getFCValue(pid), 0);
+    const sv      = computeStarterValues(players);
+    allTeamData[rid] = { total, sv, players };
+  }
+
+  // Rank all teams by total FC value
+  const sortedRids = Object.keys(allTeamData).sort(
+    (a, b) => allTeamData[b].total - allTeamData[a].total
+  );
+  const leagueRanks = {};
+  sortedRids.forEach((rid, i) => { leagueRanks[rid] = i + 1; });
+  const leagueSize = sortedRids.length;
+
+  // League-average starter values (across all teams)
+  const leagueAvg = { QB: 0, RB: 0, WR: 0, TE: 0 };
+  if (leagueSize > 0) {
+    Object.values(allTeamData).forEach(({ sv }) => {
+      ['QB','RB','WR','TE'].forEach(pos => { leagueAvg[pos] += sv[pos] || 0; });
+    });
+    ['QB','RB','WR','TE'].forEach(pos => {
+      leagueAvg[pos] = Math.round(leagueAvg[pos] / leagueSize);
+    });
+  }
+
+  // Build per-side snapshots (only for rosters involved in this trade)
+  const snapshots = {};
+  for (const side of trade.sides) {
+    const rid = String(side.rid);
+    const uid = ridToUid[rid] || ridToUid[Number(rid)];
+    const manager = allManagers[uid] || uidToName?.[uid] || `Roster ${rid}`;
+    const teamData = allTeamData[rid];
+    if (!teamData) continue;
+    const { total, sv, players } = teamData;
+    snapshots[rid] = {
+      manager,
+      players,
+      fc_values: {
+        total: Math.round(total),
+        byPosition: { QB: sv.QB||0, RB: sv.RB||0, WR: sv.WR||0, TE: sv.TE||0 }
+      },
+      starterValues:   { QB: sv.QB||0, RB: sv.RB||0, WR: sv.WR||0, TE: sv.TE||0 },
+      leagueRank:      leagueRanks[rid] || null,
+      leagueAvgStarters: leagueAvg,
+      leagueSize
+    };
+  }
+
+  return {
+    txn_id:    String(trade.txnId),
+    league_id: leagueId,
+    season:    trade.season,
+    week:      trade.week,
+    snapshots
+  };
+}
+
+async function storeSnapshot(snapshotObj) {
+  const txnId = snapshotObj.txn_id;
+  rosterSnapshotCache[txnId] = snapshotObj.snapshots;
+  if (!existingSnapshotIds.has(txnId)) {
+    await sbUpsert('roster_snapshots', snapshotObj);
+    existingSnapshotIds.add(txnId);
+  }
+}
+
+async function fetchRosterSnapshot(txnId) {
+  const key = String(txnId);
+  if (rosterSnapshotCache[key]) return rosterSnapshotCache[key];
+  const rows = await sbSelect('roster_snapshots', `txn_id=eq.${key}`);
+  if (rows?.[0]?.snapshots) {
+    rosterSnapshotCache[key] = rows[0].snapshots;
+    return rows[0].snapshots;
+  }
+  return null;
+}
+
+async function storeCurrentRosters(leagueId, ridToUid) {
+  const upserts = [];
+  for (const [rid, playerSet] of Object.entries(rosterState)) {
+    const uid     = ridToUid[rid] || ridToUid[Number(rid)] || rid;
+    const manager = allManagers[uid] || `Roster ${rid}`;
+    const players = [...playerSet];
+    const fcVals  = {};
+    players.forEach(pid => {
+      const v = getFCValue(pid);
+      if (v > 0) fcVals[pid] = v;
+    });
+    upserts.push({
+      user_id:      uid,
+      league_id:    leagueId,
+      manager_name: manager,
+      roster:       players,
+      fc_values:    fcVals,
+      last_updated: new Date().toISOString()
+    });
+  }
+  // Fire-and-forget in parallel (don't block UI)
+  upserts.forEach(row => sbUpsert('current_rosters', row));
+}
+
+// ─── LOAD LEAGUE ──────────────────────────────────────────────────────────────
 async function loadLeague() {
   const leagueId = document.getElementById('leagueInput').value.trim();
   if (!leagueId) return;
   document.getElementById('loadBtn').disabled = true;
   document.getElementById('activityContent').style.display = 'none';
-  document.getElementById('tradesContent').style.display = 'none';
-  document.getElementById('activityEmpty').style.display = 'none';
-  document.getElementById('tradesEmpty').style.display = 'none';
-  document.getElementById('progressWrap').style.display = 'block';
+  document.getElementById('tradesContent').style.display   = 'none';
+  document.getElementById('activityEmpty').style.display   = 'none';
+  document.getElementById('tradesEmpty').style.display     = 'none';
+  document.getElementById('progressWrap').style.display    = 'block';
+
   allTxns = []; allTrades = []; aiGradeCache = {};
+  rosterState = {}; rosterSnapshotCache = {};
 
   try {
-    setProgress(5, 'Loading player data...');
+    // 1. Player data
+    setProgress(3, 'Loading player data...');
     if (!Object.keys(allPlayers).length) {
       allPlayers = await api(`${BASE}/players/nfl`);
     }
 
-    setProgress(12, 'Fetching league history...');
+    // 2. FantasyCalc values
+    setProgress(7, 'Fetching FantasyCalc values...');
+    await fetchFCValues();
+
+    // 3. League history
+    setProgress(10, 'Fetching league history...');
     const seasons = await getAllSeasons(leagueId);
 
+    // 4. Current managers
     const currentUsers = await api(`${BASE}/league/${leagueId}/users`);
     allManagers = {};
     currentUsers.forEach(u => { allManagers[u.user_id] = u.display_name || u.user_id; });
 
+    // 5. Pre-load cached snapshots from Supabase
+    setProgress(13, 'Loading cached roster snapshots...');
+    existingSnapshotIds = new Set();
+    const cachedSnaps = await sbSelect('roster_snapshots', `league_id=eq.${leagueId}`);
+    cachedSnaps.forEach(s => {
+      existingSnapshotIds.add(s.txn_id);
+      rosterSnapshotCache[s.txn_id] = s.snapshots;
+    });
+
+    // 6. Seed roster state from startup draft (first/oldest season)
+    const firstLeagueId = seasons[0][1];
+    setProgress(15, 'Seeding rosters from startup draft...');
+    await seedRosterFromDraft(firstLeagueId);
+
+    // 7. Walk all seasons chronologically
     const totalSeasons = seasons.length;
+    let lastRidToUid   = {};
+
     for (let si = 0; si < totalSeasons; si++) {
       const [season, lid] = seasons[si];
-      const base = 15 + (si / totalSeasons) * 80;
+      const base = 18 + (si / totalSeasons) * 76;
       setProgress(base, `Loading ${season}...`);
       const [ridToUid, uidToName] = await getIdMaps(lid);
+      lastRidToUid = ridToUid;
+
+      // Ensure all rosters for this season are tracked
+      for (const rid of Object.keys(ridToUid)) {
+        if (!rosterState[String(rid)]) rosterState[String(rid)] = new Set();
+      }
 
       for (let week = 1; week <= 18; week++) {
         const txns = await api(`${BASE}/league/${lid}/transactions/${week}`);
@@ -549,10 +811,10 @@ async function loadLeague() {
           if (txn.status !== 'complete') continue;
           const type = txn.type;
 
-          // Activity log
+          // ── Activity log entry ──────────────────────────────────────────
           for (const rid of (txn.roster_ids || [])) {
-            const uid = ridToUid[rid];
-            const managerName = uidToName[uid] || `Roster ${rid}`;
+            const uid          = ridToUid[rid];
+            const managerName  = uidToName[uid] || `Roster ${rid}`;
             const canonicalName = allManagers[uid] || managerName;
             const adds  = txn.adds  || {};
             const drops = txn.drops || {};
@@ -561,13 +823,13 @@ async function loadLeague() {
             const dropped = Object.entries(drops).filter(([,r]) => r===rid).map(([p]) => playerLabel(p));
             picks.forEach(p => {
               const d = `${p.season} Rd ${p.round} pick`;
-              if (p.owner_id===rid) added.push(d);
-              else if (p.previous_owner_id===rid) dropped.push(d);
+              if (p.owner_id === rid) added.push(d);
+              else if (p.previous_owner_id === rid) dropped.push(d);
             });
             allTxns.push({ season, week, type, uid, managerName, canonicalName, added, dropped });
           }
 
-          // Trade — build structured object for AI grading
+          // ── Trade: snapshot BEFORE updating rosterState ─────────────────
           if (type === 'trade') {
             const sides = {};
             const adds  = txn.adds  || {};
@@ -575,25 +837,41 @@ async function loadLeague() {
 
             for (const rid of (txn.roster_ids || [])) {
               const uid = ridToUid[rid];
-              sides[rid] = {
-                rid, uid,
-                name: allManagers[uid] || uidToName[uid] || `Roster ${rid}`,
+              sides[String(rid)] = {
+                rid: String(rid), uid,
+                name:    allManagers[uid] || uidToName[uid] || `Roster ${rid}`,
                 players: [],
-                picks: []
+                picks:   []
               };
             }
             Object.entries(adds).forEach(([pid, rid]) => {
-              if (sides[rid]) sides[rid].players.push(pid);
+              if (sides[String(rid)]) sides[String(rid)].players.push(pid);
             });
             picks.forEach(p => {
-              if (sides[p.owner_id]) sides[p.owner_id].picks.push(p);
+              if (sides[String(p.owner_id)]) sides[String(p.owner_id)].picks.push(p);
             });
 
-            allTrades.push({ season, week, txnId: txn.transaction_id, sides: Object.values(sides) });
+            const trade = {
+              season, week,
+              txnId: txn.transaction_id,
+              sides: Object.values(sides)
+            };
+            allTrades.push(trade);
+
+            // Build and store snapshot using pre-trade roster state
+            const snapshotObj = buildSnapshotForTrade(leagueId, trade, ridToUid, uidToName);
+            await storeSnapshot(snapshotObj);
           }
+
+          // ── Update rosterState with this transaction ─────────────────────
+          applyTxnToRosterState(txn);
         }
       }
     }
+
+    // 8. Persist current rosters
+    setProgress(97, 'Saving current rosters...');
+    await storeCurrentRosters(leagueId, lastRidToUid);
 
     setProgress(100, 'Done!');
     setTimeout(() => {
@@ -602,10 +880,10 @@ async function loadLeague() {
       applyFilters();
       renderTradeGrades();
       document.getElementById('activityContent').style.display = 'block';
-      document.getElementById('tradesContent').style.display = 'block';
+      document.getElementById('tradesContent').style.display   = 'block';
     }, 300);
 
-  } catch(e) {
+  } catch (e) {
     document.getElementById('progressLabel').style.color = '#ff5555';
     document.getElementById('progressLabel').textContent = 'Error: ' + e.message;
     console.error(e);
@@ -614,7 +892,7 @@ async function loadLeague() {
   }
 }
 
-// ─── HELPERS ─────────────────────────────────────────────────────────────────
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
 async function getAllSeasons(lid) {
   const s = [];
   let l = lid;
@@ -623,7 +901,7 @@ async function getAllSeasons(lid) {
     s.push([info.season || 'Unknown', l]);
     l = info.previous_league_id || null;
   }
-  return s.sort((a,b) => a[0].localeCompare(b[0]));
+  return s.sort((a, b) => a[0].localeCompare(b[0]));
 }
 
 async function getIdMaps(lid) {
@@ -641,23 +919,23 @@ async function getIdMaps(lid) {
 function playerLabel(pid) {
   const p = allPlayers[String(pid)];
   if (!p) return `ID:${pid}`;
-  return `${p.first_name||''} ${p.last_name||''}`.trim() + (p.position ? ` (${p.position}${p.team?` - ${p.team}`:''})` : '');
+  return `${p.first_name||''} ${p.last_name||''}`.trim() +
+    (p.position ? ` (${p.position}${p.team ? ` - ${p.team}` : ''})` : '');
 }
-function playerName(pid) {
+function playerName(pid)  {
   const p = allPlayers[String(pid)];
   if (!p) return `Player ${pid}`;
   return `${p.first_name||''} ${p.last_name||''}`.trim();
 }
-function playerPos(pid)  { return allPlayers[String(pid)]?.position || ''; }
-function playerTeam(pid) { return allPlayers[String(pid)]?.team || ''; }
-function playerAge(pid) {
+function playerPos(pid)   { return allPlayers[String(pid)]?.position || ''; }
+function playerTeam(pid)  { return allPlayers[String(pid)]?.team     || ''; }
+function playerAge(pid)   {
   const p = allPlayers[String(pid)];
   if (!p?.birth_date) return null;
-  const birth = new Date(p.birth_date);
-  return Math.floor((Date.now() - birth) / (365.25*24*60*60*1000));
+  return Math.floor((Date.now() - new Date(p.birth_date)) / (365.25 * 24 * 60 * 60 * 1000));
 }
 
-// ─── STATS FETCHING ──────────────────────────────────────────────────────────
+// ─── STATS FETCHING ───────────────────────────────────────────────────────────
 async function fetchWeekStats(season, week) {
   const key = `${season}_${week}`;
   if (weekStatsCache[key]) return weekStatsCache[key];
@@ -676,8 +954,7 @@ async function fetchWeekStats(season, week) {
 }
 
 async function getPositionalAvg(season, upToWeek, pos) {
-  // Aggregate totals across all weeks up to tradeWeek
-  const posPoints = {}; // pid → total pts
+  const posPoints = {};
   for (let w = 1; w <= upToWeek; w++) {
     const stats = await fetchWeekStats(season, w);
     for (const [pid, pts] of Object.entries(stats)) {
@@ -686,140 +963,170 @@ async function getPositionalAvg(season, upToWeek, pos) {
       }
     }
   }
-  const totals = Object.values(posPoints).sort((a, b) => b - a);
-  const cutoff = (pos === 'QB' || pos === 'TE') ? 14 : 28;
+  const totals  = Object.values(posPoints).sort((a, b) => b - a);
+  const cutoff  = (pos === 'QB' || pos === 'TE') ? 14 : 28;
   const starters = totals.slice(0, cutoff);
   if (!starters.length) return 0;
-  // Return average PPG across starters (divide by weeks played, approx upToWeek)
-  const avgTotal = starters.reduce((a, b) => a + b, 0) / starters.length;
-  return avgTotal / upToWeek; // per-week average
+  return (starters.reduce((a, b) => a + b, 0) / starters.length) / upToWeek;
 }
 
 async function fetchPlayerStats(pid, season, tradeWeek) {
   const cacheKey = `${pid}_${season}_${tradeWeek}`;
   if (seasonStatsCache[cacheKey]) return seasonStatsCache[cacheKey];
 
-  let totalPts = 0;
-  let games = 0;
+  let totalPts = 0, games = 0;
+  let last4pts  = 0, last4games = 0;
+  const last4Start = Math.max(1, tradeWeek - 3);
 
   for (let w = 1; w <= tradeWeek; w++) {
     const stats = await fetchWeekStats(season, w);
-    const pts = stats[String(pid)];
+    const pts   = stats[String(pid)];
     if (pts > 0) {
       totalPts += pts;
       games++;
+      if (w >= last4Start) { last4pts += pts; last4games++; }
     }
   }
 
-  const ppg = games > 0 ? totalPts / games : 0;
-  const pos = playerPos(pid);
-  const posAvgPPG = pos ? await getPositionalAvg(season, tradeWeek, pos) : 0;
-  const vsAvgPct = posAvgPPG > 0 ? Math.round(((ppg - posAvgPPG) / posAvgPPG) * 100) : null;
+  const ppg      = games > 0 ? totalPts / games : 0;
+  const last4ppg = last4games > 0 ? last4pts / last4games : 0;
+  const pos      = playerPos(pid);
+  const posAvg   = pos ? await getPositionalAvg(season, tradeWeek, pos) : 0;
+  const vsAvgPct = posAvg > 0 ? Math.round(((ppg - posAvg) / posAvg) * 100) : null;
 
-  const result = { totalPts: +totalPts.toFixed(1), games, ppg: +ppg.toFixed(1), vsAvgPct };
+  const result = {
+    totalPts:  +totalPts.toFixed(1),
+    games,
+    ppg:       +ppg.toFixed(1),
+    last4ppg:  +last4ppg.toFixed(1),
+    vsAvgPct
+  };
   seasonStatsCache[cacheKey] = result;
   return result;
 }
 
-// ─── AI TRADE GRADING ────────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `You are an expert dynasty fantasy football trade analyzer for a 14-team PPR league with standard lineups (1 QB, 1 RB, 1 WR, 1 TE, 1 FLEX). No Superflex. No TE Premium.
-
-POSITIONAL PRIORITY IN THIS LEAGUE:
-1. RB — highest value, shortest career curve, scarcest in 14-team pool
-2. WR — PPR boost makes elite WRs extremely valuable, longer career curve
-3. TE — valuable for scarcity but not premium-inflated; elite >> everyone else
-4. QB — lowest trade value in 1-QB non-Superflex; never overpay
-
-EVALUATION FRAMEWORK:
-For each player assess:
-- Age and career curve (RB peak: 23–27, WR/TE peak: 24–28)
-- Position and PPR relevance (target share, receiving role vs. pure rusher)
-- In a 14-team league, depth has real value — no such thing as "just a bench piece"
-
-For each draft pick assess:
-- Round and year
-- Source team context if known (contender = lower value, rebuilder = higher value)
-- Future picks carry more uncertainty — discount accordingly
-
-TIMELINE WINDOWS — evaluate each side across all three:
-- Contention (0–2 years): Who helps win now?
-- Transition (2–4 years): Who is ascending vs. declining?
-- Rebuild (4+ years): Who has the most long-term runway?
-
-RED FLAGS — always check for:
-- Paying a premium for RB age 28+ or WR/TE age 30+
-- Overvaluing QB in a 1-QB format
-- Picks from contending teams treated as if from rebuilders
-- Sell-high or buy-low timing on a player
-
-Respond ONLY in the following JSON format with no preamble or markdown:
-{
-  "sideA": {
-    "manager": "<name>",
-    "grade": "<A|B|C|D|F>",
-    "verdict": "<Won Clearly|Won Narrowly|Even|Lost Narrowly|Lost Badly>",
-    "timelineFit": "<Contention|Transition|Rebuild>",
-    "summary": "<2 sentence analysis>",
-    "keyRisk": "<1 sentence>"
-  },
-  "sideB": {
-    "manager": "<name>",
-    "grade": "<A|B|C|D|F>",
-    "verdict": "<Won Clearly|Won Narrowly|Even|Lost Narrowly|Lost Badly>",
-    "timelineFit": "<Contention|Transition|Rebuild>",
-    "summary": "<2 sentence analysis>",
-    "keyRisk": "<1 sentence>"
-  },
-  "overallVerdict": "<2-3 sentence overall take on the trade>",
-  "longTermWatch": "<1 sentence on what to monitor in 1-2 years>"
-}`;
-
-function buildTradePrompt(trade, statsMap = {}) {
+// ─── TRADE PROMPT ─────────────────────────────────────────────────────────────
+function buildTradePrompt(trade, statsMap = {}, snapshots = null) {
   const lines = ['Analyze this dynasty trade:\n'];
+
+  // Assets each side receives
   trade.sides.forEach((side, i) => {
     const label = i === 0 ? 'SIDE A' : 'SIDE B';
     lines.push(`${label} — ${side.name} receives:`);
+
     side.players.forEach(pid => {
-      const age = playerAge(pid);
-      const stats = statsMap[pid];
+      const age    = playerAge(pid);
+      const stats  = statsMap[pid];
+      const fcVal  = getFCValue(pid);
+      const fcStr  = fcVal > 0 ? ` | FC: ${fcVal.toLocaleString()}` : '';
+
       let statStr = 'No stats available';
       if (stats && stats.games > 0) {
         const vsStr = stats.vsAvgPct !== null
           ? ` ${stats.vsAvgPct >= 0 ? '+' : ''}${stats.vsAvgPct}% vs ${playerPos(pid)} avg`
           : '';
-        statStr = `${stats.ppg} PPG, ${stats.games} games${vsStr}`;
+        const l4Str = stats.last4ppg > 0 ? `, L4: ${stats.last4ppg} PPG` : '';
+        statStr = `${stats.ppg} PPG, ${stats.games} games${vsStr}${l4Str}`;
       }
-      lines.push(`- ${playerName(pid)}, ${playerPos(pid)}, ${playerTeam(pid) || 'FA'}${age ? `, Age ${age}` : ''} | ${statStr}`);
+
+      lines.push(
+        `- ${playerName(pid)}, ${playerPos(pid)}, ${playerTeam(pid) || 'FA'}` +
+        `${age ? `, Age ${age}` : ''} | ${statStr}${fcStr}`
+      );
     });
+
     side.picks.forEach(p => {
       lines.push(`- ${p.season} Rd${p.round} pick (source: ${p.previous_owner_id ? 'known team' : 'source unknown'})`);
     });
+
     if (side.players.length === 0 && side.picks.length === 0) lines.push('- (nothing)');
     lines.push('');
   });
+
+  // Roster context from pre-trade snapshot
+  if (snapshots) {
+    lines.push('ROSTER CONTEXT AT TIME OF TRADE:');
+
+    for (const side of trade.sides) {
+      const ctx = snapshots[String(side.rid)];
+      if (!ctx) continue;
+
+      const sv = ctx.starterValues || {};
+      const la = ctx.leagueAvgStarters || {};
+      const ls = ctx.leagueSize || 14;
+
+      // vs-league-average percentages
+      const vsLA = ['QB','RB','WR','TE'].map(pos => {
+        if (!la[pos]) return `${pos} N/A`;
+        const pct = Math.round(((sv[pos]||0) - la[pos]) / la[pos] * 100);
+        return `${pos} ${pct >= 0 ? '+' : ''}${pct}%`;
+      }).join(' | ');
+
+      // Positional needs and surpluses
+      const needs = [], surps = [];
+      ['QB','RB','WR','TE'].forEach(pos => {
+        if (!la[pos] || la[pos] === 0) return;
+        const pct = Math.round(((sv[pos]||0) - la[pos]) / la[pos] * 100);
+        if (pct <= -20) needs.push(`${pos} (${pct}%)`);
+        if (pct >= 20)  surps.push(`${pos} (+${pct}%)`);
+      });
+
+      lines.push(`${ctx.manager} — League Rank: #${ctx.leagueRank || '?'} of ${ls}`);
+      lines.push(
+        `  Starter Values (FC): QB ${(sv.QB||0).toLocaleString()} | RB ${(sv.RB||0).toLocaleString()}` +
+        ` | WR ${(sv.WR||0).toLocaleString()} | TE ${(sv.TE||0).toLocaleString()}`
+      );
+      lines.push(`  vs League Average: ${vsLA}`);
+      if (needs.length) lines.push(`  Position needs: ${needs.join(', ')}`);
+      if (surps.length) lines.push(`  Position surplus: ${surps.join(', ')}`);
+
+      // Full roster grouped by position
+      const byPos = { QB: [], RB: [], WR: [], TE: [], K: [], DEF: [], OTHER: [] };
+      (ctx.players || []).forEach(pid => {
+        const pos  = playerPos(pid) || 'OTHER';
+        const nm   = playerName(pid);
+        const age  = playerAge(pid);
+        const val  = getFCValue(pid);
+        const entry = `${nm}${age ? `, Age ${age}` : ''}${val > 0 ? `, FC: ${val.toLocaleString()}` : ''}`;
+        (byPos[pos] || byPos.OTHER).push(entry);
+      });
+
+      lines.push('  Full roster:');
+      ['QB','RB','WR','TE'].forEach(pos => {
+        if (byPos[pos].length) lines.push(`    ${pos}: ${byPos[pos].join(' | ')}`);
+      });
+      if (byPos.OTHER.length) lines.push(`    OTHER: ${byPos.OTHER.join(' | ')}`);
+      lines.push('');
+    }
+  }
+
   return lines.join('\n');
 }
 
+// ─── AI TRADE GRADING ─────────────────────────────────────────────────────────
 async function analyzeTradeWithAI(trade) {
   const cacheKey = String(trade.txnId);
   if (aiGradeCache[cacheKey]) return aiGradeCache[cacheKey];
 
-  // Fetch real stats for every player involved, up to the week of the trade
+  // Fetch player stats up to trade week (in parallel)
   const allPids = trade.sides.flatMap(s => s.players);
   const statsMap = {};
   await Promise.all(allPids.map(async pid => {
     statsMap[pid] = await fetchPlayerStats(pid, trade.season, trade.week);
   }));
 
+  // Get roster snapshot built during loadLeague (memory cache first)
+  const snapshots = await fetchRosterSnapshot(cacheKey);
+
   const response = await fetch(SUPABASE_EDGE_URL, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
+      'Content-Type':  'application/json',
       'Authorization': 'Bearer ' + SUPABASE_ANON_KEY
     },
     body: JSON.stringify({
-      txnId: cacheKey,
-      tradePrompt: buildTradePrompt(trade, statsMap)
+      txnId:       cacheKey,
+      tradePrompt: buildTradePrompt(trade, statsMap, snapshots)
     })
   });
 
@@ -831,10 +1138,10 @@ async function analyzeTradeWithAI(trade) {
   return data.result;
 }
 
-// ─── RENDER TRADE GRADES ─────────────────────────────────────────────────────
+// ─── RENDER TRADE GRADES ──────────────────────────────────────────────────────
 function verdictClass(verdict) {
   if (!verdict) return 'verdict-even';
-  if (verdict.toLowerCase().includes('won')) return 'verdict-won';
+  if (verdict.toLowerCase().includes('won'))  return 'verdict-won';
   if (verdict.toLowerCase().includes('lost')) return 'verdict-lost';
   return 'verdict-even';
 }
@@ -847,7 +1154,6 @@ function renderTradeGrades() {
   let trades = allTrades;
   if (season  !== 'all') trades = trades.filter(t => t.season === season);
   if (manager !== 'all') trades = trades.filter(t => t.sides.some(s => s.name === manager));
-
   if (sort === 'grade') {
     trades = [...trades].sort((a, b) => lopsidedness(b) - lopsidedness(a));
   } else {
@@ -855,7 +1161,6 @@ function renderTradeGrades() {
   }
 
   renderedTradeIds = trades.map(t => String(t.txnId));
-
   const list = document.getElementById('tradeGradesList');
   if (!trades.length) { list.innerHTML = '<div class="status">No trades match filters</div>'; return; }
 
@@ -890,12 +1195,12 @@ function renderTradeGrades() {
 }
 
 function renderTradeBody(trade, cached) {
-  // Asset list for each side (always shown)
   const assetHTML = `
     <div class="trade-sides">
       ${trade.sides.map((side, si) => {
         const aiSide = cached ? (si === 0 ? cached.sideA : cached.sideB) : null;
         const g = aiSide?.grade || '?';
+        const flags = aiSide?.flags || [];
         return `
         <div class="trade-side">
           <div class="trade-side-header">
@@ -908,13 +1213,16 @@ function renderTradeBody(trade, cached) {
             </div>
             <span class="grade-chip grade-${g}" style="font-size:1.4rem;">${g}</span>
           </div>
-          ${side.players.map(pid => `
+          ${side.players.map(pid => {
+            const fcVal = getFCValue(pid);
+            return `
             <div class="asset-row">
               <div class="asset-info">
                 <div class="asset-name">${playerName(pid)}</div>
-                <div class="asset-detail">${playerPos(pid)}${playerTeam(pid) ? ' · ' + playerTeam(pid) : ''}${playerAge(pid) ? ' · Age ' + playerAge(pid) : ''}</div>
+                <div class="asset-detail">${playerPos(pid)}${playerTeam(pid) ? ' · ' + playerTeam(pid) : ''}${playerAge(pid) ? ' · Age ' + playerAge(pid) : ''}${fcVal > 0 ? ' · FC ' + fcVal.toLocaleString() : ''}</div>
               </div>
-            </div>`).join('')}
+            </div>`;
+          }).join('')}
           ${side.picks.map(p => `
             <div class="asset-row">
               <div class="asset-info">
@@ -923,61 +1231,62 @@ function renderTradeBody(trade, cached) {
               </div>
             </div>`).join('')}
           ${aiSide ? `
-            <div style="margin-top:0.75rem; padding-top:0.75rem; border-top: 1px solid var(--border);">
+            <div style="margin-top:0.75rem; padding-top:0.75rem; border-top:1px solid var(--border);">
               <div class="ai-summary">${aiSide.summary}</div>
               <div class="ai-risk">${aiSide.keyRisk}</div>
+              ${flags.length ? `<div style="margin-top:0.5rem; display:flex; flex-direction:column; gap:0.3rem;">
+                ${flags.map(f => `<div style="font-size:0.72rem; color:var(--yellow); font-family:'DM Mono',monospace; padding:0.3rem 0.55rem; background:rgba(255,209,102,0.07); border-left:2px solid var(--yellow); border-radius:0 3px 3px 0;">🚩 ${f}</div>`).join('')}
+              </div>` : ''}
             </div>` : ''}
         </div>`;
       }).join('')}
     </div>`;
 
-  // Overall verdict block
-  const overallHTML = cached ? `
+  if (!cached) {
+    return `${assetHTML}
+      <div class="ai-loading" id="ai-loading-${trade.txnId}">
+        <div class="ai-spinner"></div>Analyzing trade with AI...
+      </div>`;
+  }
+
+  const overallHTML = `
     <div class="ai-overall">
       <div class="ai-overall-label">AI Analysis</div>
+      ${cached.rawValueDelta ? `<div style="font-size:0.78rem; color:var(--blue); font-family:'DM Mono',monospace; margin-bottom:0.5rem;">⚖ ${cached.rawValueDelta}</div>` : ''}
       <div class="ai-overall-text">${cached.overallVerdict}</div>
       <div class="ai-watch">📌 Watch: ${cached.longTermWatch}</div>
-    </div>` : '';
-
-  if (!cached) {
-    return `${assetHTML}<div class="ai-loading" id="ai-loading-${trade.txnId}">
-      <div class="ai-spinner"></div>Analyzing trade with AI...
     </div>`;
-  }
 
   return `${overallHTML}${assetHTML}`;
 }
 
 async function toggleTrade(i, txnId) {
-  const body = document.getElementById(`body-${i}`);
-  const hint = document.getElementById(`hint-${i}`);
+  const body   = document.getElementById(`body-${i}`);
+  const hint   = document.getElementById(`hint-${i}`);
   const isOpen = body.classList.contains('open');
 
   body.classList.toggle('open');
   hint.textContent = body.classList.contains('open') ? '▲ collapse' : '▼ expand';
 
-  // If opening and not yet graded, fetch AI analysis
   if (!isOpen && !aiGradeCache[String(txnId)]) {
     const trade = allTrades.find(t => String(t.txnId) === String(txnId));
     if (!trade) return;
     try {
       await analyzeTradeWithAI(trade);
-      // Re-render this card's body with results
       body.innerHTML = renderTradeBody(trade, aiGradeCache[String(txnId)]);
-      // Update grade chips in header
       const cached = aiGradeCache[String(txnId)];
-      const chips = document.querySelectorAll(`#card-${i} .trade-grades-row .grade-chip`);
+      const chips  = document.querySelectorAll(`#card-${i} .trade-grades-row .grade-chip`);
       if (chips[0] && cached?.sideA) {
-        chips[0].className = `grade-chip grade-${cached.sideA.grade}`;
+        chips[0].className   = `grade-chip grade-${cached.sideA.grade}`;
         chips[0].textContent = `${trade.sides[0].name.split(/\s+/)[0]} ${cached.sideA.grade}`;
       }
       if (chips[1] && cached?.sideB) {
-        chips[1].className = `grade-chip grade-${cached.sideB.grade}`;
+        chips[1].className   = `grade-chip grade-${cached.sideB.grade}`;
         chips[1].textContent = `${trade.sides[1].name.split(/\s+/)[0]} ${cached.sideB.grade}`;
       }
-    } catch(e) {
+    } catch (e) {
       body.innerHTML = renderTradeBody(trade, null) +
-        `<div class="ai-error">AI analysis failed: ${e.message}. Check your API key / network.</div>`;
+        `<div class="ai-error">AI analysis failed: ${e.message}</div>`;
     }
   }
 }
@@ -989,7 +1298,7 @@ function lopsidedness(trade) {
   return Math.abs((order[cached.sideA?.grade]||0) - (order[cached.sideB?.grade]||0));
 }
 
-// ─── ACTIVITY FILTERS & RENDER ────────────────────────────────────────────
+// ─── ACTIVITY FILTERS & RENDER ────────────────────────────────────────────────
 function populateFilters() {
   const seasons  = [...new Set(allTxns.map(t => t.season))].sort();
   const managers = [...new Set(allTxns.map(t => t.canonicalName))].sort();
@@ -1018,9 +1327,9 @@ function applyFilters() {
 }
 
 function renderStats(txns) {
-  const trades = txns.filter(t=>t.type==='trade').length;
-  const waivers = txns.filter(t=>t.type==='waiver').length;
-  const fas = txns.filter(t=>t.type==='free_agent').length;
+  const trades  = txns.filter(t => t.type === 'trade').length;
+  const waivers = txns.filter(t => t.type === 'waiver').length;
+  const fas     = txns.filter(t => t.type === 'free_agent').length;
   document.getElementById('statsRow').innerHTML = `
     <div class="stat-card"><div class="label">Total Moves</div><div class="value">${txns.length}</div></div>
     <div class="stat-card"><div class="label">Trades</div><div class="value" style="color:var(--accent)">${trades}</div></div>
@@ -1031,13 +1340,13 @@ function renderStats(txns) {
 
 function renderLeaderboard(txns) {
   const counts = {};
-  txns.forEach(t => { counts[t.canonicalName] = (counts[t.canonicalName]||0)+1; });
-  const sorted = Object.entries(counts).sort((a,b)=>b[1]-a[1]);
-  const max = sorted[0]?.[1]||1;
+  txns.forEach(t => { counts[t.canonicalName] = (counts[t.canonicalName] || 0) + 1; });
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  const max    = sorted[0]?.[1] || 1;
   document.getElementById('leaderboardLabel').textContent = `${sorted.length} managers`;
-  document.getElementById('leaderboardBody').innerHTML = sorted.map(([name,count],i) => `
+  document.getElementById('leaderboardBody').innerHTML = sorted.map(([name, count], i) => `
     <div class="lb-row">
-      <div class="lb-rank ${i<3?'top':''}">${i+1}</div>
+      <div class="lb-rank ${i < 3 ? 'top' : ''}">${i+1}</div>
       <div class="lb-name">${name}</div>
       <div class="lb-bar-wrap">
         <div class="lb-bar"><div class="lb-fill" style="width:${(count/max)*100}%"></div></div>
@@ -1048,8 +1357,8 @@ function renderLeaderboard(txns) {
 
 function renderTable(txns) {
   document.getElementById('txnCount').textContent = `${txns.length} transactions`;
-  const typeLabel = {trade:'Trade',waiver:'Waiver',free_agent:'FA'};
-  const badgeClass = {trade:'badge-trade',waiver:'badge-waiver',free_agent:'badge-free_agent'};
+  const typeLabel  = { trade: 'Trade', waiver: 'Waiver', free_agent: 'FA' };
+  const badgeClass = { trade: 'badge-trade', waiver: 'badge-waiver', free_agent: 'badge-free_agent' };
   document.getElementById('txnBody').innerHTML = [...txns].reverse().map(t => `
     <tr>
       <td><span class="season-tag">${t.season}</span></td>
@@ -1057,10 +1366,10 @@ function renderTable(txns) {
       <td><span class="badge ${badgeClass[t.type]||''}">${typeLabel[t.type]||t.type}</span></td>
       <td>
         <div class="team-name">${t.canonicalName}</div>
-        ${t.type==='trade'&&t.with?.length?`<div style="font-size:0.75rem;color:var(--muted);margin-top:0.2rem;">vs ${t.with.join(', ')}</div>`:''}
+        ${t.type==='trade'&&t.with?.length ? `<div style="font-size:0.75rem;color:var(--muted);margin-top:0.2rem;">vs ${t.with.join(', ')}</div>` : ''}
       </td>
-      <td><div class="player-list">${t.added.length?t.added.map(p=>`<div class="player-item highlight">+ ${p}</div>`).join(''):'<div class="player-item">—</div>'}</div></td>
-      <td><div class="player-list">${t.dropped.length?t.dropped.map(p=>`<div class="player-item">− ${p}</div>`).join(''):'<div class="player-item">—</div>'}</div></td>
+      <td><div class="player-list">${t.added.length ? t.added.map(p=>`<div class="player-item highlight">+ ${p}</div>`).join('') : '<div class="player-item">—</div>'}</div></td>
+      <td><div class="player-list">${t.dropped.length ? t.dropped.map(p=>`<div class="player-item">− ${p}</div>`).join('') : '<div class="player-item">—</div>'}</div></td>
     </tr>`).join('');
 }
 </script>
