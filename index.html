@@ -1946,7 +1946,21 @@ async function publishArticle() {
     author: 'Higgs',
     published_at: new Date().toISOString()
   };
-  const ok = await sbUpsert('articles', article);
+  // Plain INSERT — articles are never upserted, always new rows
+  let ok = false;
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/articles`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal'
+      },
+      body: JSON.stringify(article)
+    });
+    ok = r.ok;
+  } catch (e) { ok = false; }
   if (ok) {
     document.getElementById('artTitle').value = '';
     document.getElementById('artBody').value  = '';
