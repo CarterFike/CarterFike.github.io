@@ -710,6 +710,19 @@ function switchTab(name) {
 // ─── FANTASYCALC ─────────────────────────────────────────────────────────────
 async function fetchFCValues() {
   try {
+    // Check Supabase cache first
+    const cacheRows = await sbSelect('fc_cache', 'id=eq.1');
+    const cached = cacheRows?.[0];
+    if (cached?.cached_at) {
+      const age = Date.now() - new Date(cached.cached_at).getTime();
+      if (age < 24 * 60 * 60 * 1000 && cached.data?.fcValues) {
+        fcValues     = cached.data.fcValues;
+        fcPickValues = cached.data.fcPickValues || {};
+        console.log('FC values loaded from cache. Picks:', Object.keys(fcPickValues).slice(0, 4));
+        return;
+      }
+    }
+    // Fetch fresh from FantasyCalc
     const data = await fetch(FC_URL).then(r => r.json());
     fcValues = {};
     fcPickValues = {};
@@ -730,7 +743,13 @@ async function fetchFCValues() {
         }
       }
     });
-    console.log('FC pick values loaded:', Object.keys(fcPickValues).slice(0, 8));
+    console.log('FC values fetched fresh. Picks:', Object.keys(fcPickValues).slice(0, 4));
+    // Store in Supabase cache
+    await sbUpsert('fc_cache', {
+      id: 1,
+      data: { fcValues, fcPickValues },
+      cached_at: new Date().toISOString()
+    });
   } catch (e) { console.warn('FantasyCalc fetch failed:', e.message); }
 }
 function getFCValue(pid) { return fcValues[String(pid)]?.value || 0; }
@@ -1942,6 +1961,7 @@ async function publishArticle() {
   const body     = document.getElementById('artBody').value.trim();
   if (!title || !body) { alert('Title and body are required.'); return; }
   const article = {
+    id: crypto.randomUUID(),
     title, category, body,
     author: 'Higgs',
     published_at: new Date().toISOString()
