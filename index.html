@@ -513,26 +513,62 @@ async function fetchFCValues() {
     fcValues = {};
     fcPickValues = {};
     data.forEach(entry => {
-      const pos = entry.player?.position || '';
-      const sid = entry.player?.sleeperId;
-      if (pos === 'PICK' || (!sid && !pos)) {
-        // Draft pick entry — name like "2026 Pick 1.01"
-        const nm = entry.player?.name || entry.player?.fullName || entry.player?.displayName || '';
+      const pos = entry.player?.position;
+      const nm  = entry.player?.name || '';
+      if (pos === 'PICK') {
         if (nm && entry.value > 0) fcPickValues[nm] = { value: entry.value };
-      }
-      if (sid) {
-        fcValues[String(sid)] = {
-          value:        entry.value        || 0,
-          overallRank:  entry.overallRank  || null,
-          positionRank: entry.positionRank || null,
-          trend30Day:   entry.trend30Day   || 0
-        };
+      } else {
+        const sid = entry.player?.sleeperId;
+        if (sid) {
+          fcValues[String(sid)] = {
+            value:        entry.value        || 0,
+            overallRank:  entry.overallRank  || null,
+            positionRank: entry.positionRank || null,
+            trend30Day:   entry.trend30Day   || 0
+          };
+        }
       }
     });
-    console.log('FC pick values loaded:', Object.keys(fcPickValues).length);
+    console.log('FC pick values loaded:', Object.keys(fcPickValues).slice(0, 8));
   } catch (e) { console.warn('FantasyCalc fetch failed:', e.message); }
 }
 function getFCValue(pid) { return fcValues[String(pid)]?.value || 0; }
+
+// Map pick slot (1-N) to FC bucket label for slotted picks
+function slotToBucket(slot, numTeams) {
+  const n = numTeams || 14;
+  const early = Math.ceil(n / 3);       // 1-5  => Early
+  const mid   = Math.ceil(2 * n / 3);   // 6-9  => Mid
+  if (slot <= early) return 'Early';
+  if (slot <= mid)   return 'Mid';
+  return 'Late';                         // 10-14 => Late
+}
+
+// Look up FC value for a pick. For slotted (2026) picks, use Early/Mid/Late bucket.
+// For unslotted future picks, use the plain round name.
+function getFCPickValue(season, round, slot, numTeams) {
+  const roundNames = { 1: '1st', 2: '2nd', 3: '3rd' };
+  const rnd = roundNames[round] || `${round}th`;
+
+  if (slot !== null && slot !== undefined) {
+    // Slotted: "2026 Pick 1.07"
+    const padded = String(slot).padStart(2, '0');
+    const key = `${season} Pick ${round}.${padded}`;
+    if (fcPickValues[key]) return fcPickValues[key].value;
+    // Fallback: median of all slots for that season+round
+    const all = Object.entries(fcPickValues)
+      .filter(([k]) => k.startsWith(`${season} Pick ${round}.`))
+      .map(([, v]) => v.value)
+      .sort((a, b) => a - b);
+    if (all.length) return all[Math.floor(all.length / 2)];
+  }
+
+  // Unslotted future: "2027 1st"
+  const key2 = `${season} ${rnd}`;
+  if (fcPickValues[key2]) return fcPickValues[key2].value;
+
+  return 0;
+}
 
 // ─── ROSTER STATE ─────────────────────────────────────────────────────────────
 async function seedRosterFromDraft(firstLeagueId) {
@@ -1038,30 +1074,16 @@ function buildStrengthGrid(sv, dv, rankings) {
   }).join('')}</div>`;
 }
 
-function getFCPickValue(season, round, slot) {
-  // Try exact match first
-  if (slot !== null && slot !== undefined) {
-    const name = `${season} Pick ${round}.${String(slot).padStart(2, '0')}`;
-    if (fcPickValues[name]) return fcPickValues[name].value;
-  }
-  // Fallback: median of all picks for that year+round
-  const prefix = `${season} Pick ${round}.`;
-  const vals = Object.entries(fcPickValues)
-    .filter(([n]) => n.startsWith(prefix))
-    .map(([, v]) => v.value)
-    .sort((a, b) => a - b);
-  if (!vals.length) return 0;
-  return vals[Math.floor(vals.length / 2)];
-}
-
 async function fetchOwnedPicks(leagueId) {
   ownedPicksMap = {};
   try {
     const rids = Object.keys(rawRosterData);
-    const currentYear = parseInt(latestSeason) || 2025;
+    const currentYear = parseInt(latestSeason) || 2026;
+    // currentYear = current rookie draft (slotted), +1/+2 = future (unslotted)
     const seasons = [String(currentYear), String(currentYear + 1), String(currentYear + 2)];
+    const draftedSeason = String(currentYear);
 
-    // Init: each team owns their own picks for future seasons
+    // Init: every team owns their own picks for all three seasons
     rids.forEach(rid => {
       ownedPicksMap[rid] = [];
       seasons.forEach(season => {
@@ -1071,23 +1093,21 @@ async function fetchOwnedPicks(leagueId) {
       });
     });
 
-    // Apply traded picks to transfer ownership
+    // Apply traded_picks to transfer ownership
     let tradedPicks = [];
     try { tradedPicks = await api(`${BASE}/league/${leagueId}/traded_picks`); } catch (e) {}
     tradedPicks.forEach(tp => {
       const season   = String(tp.season);
       if (!seasons.includes(season)) return;
       const round    = tp.round;
-      const origRid  = String(tp.roster_id);  // whose pick originally
-      const ownerRid = String(tp.owner_id);   // current owner
+      const origRid  = String(tp.roster_id);
+      const ownerRid = String(tp.owner_id);
       if (origRid === ownerRid) return;
-      // Remove from original owner
       if (ownedPicksMap[origRid]) {
         ownedPicksMap[origRid] = ownedPicksMap[origRid].filter(
           p => !(p.season === season && p.round === round && p.originalRid === origRid)
         );
       }
-      // Add to current owner (avoid dupes)
       if (ownedPicksMap[ownerRid] && !ownedPicksMap[ownerRid].some(
         p => p.season === season && p.round === round && p.originalRid === origRid
       )) {
@@ -1095,27 +1115,31 @@ async function fetchOwnedPicks(leagueId) {
       }
     });
 
-    // Fetch upcoming rookie drafts to get assigned slots
+    // Resolve 2026 slots from draft_order on the draft object itself
+    // draft_order = { user_id: slot_number } — set before draft starts
     let drafts = [];
     try { drafts = await api(`${BASE}/league/${leagueId}/drafts`); } catch (e) {}
-    const upcoming = drafts.filter(d => d.status !== 'complete');
-    for (const draft of upcoming) {
-      try {
-        const draftPicks = await api(`${BASE}/draft/${draft.draft_id}/picks`);
-        draftPicks.forEach(dp => {
-          const season  = String(dp.metadata?.season || draft.season || currentYear + 1);
-          const round   = dp.round;
-          const slot    = dp.draft_slot || dp.pick_no || null;
-          const ownerRid = String(dp.roster_id);
-          const origRid  = String(dp.metadata?.original_roster_id || dp.roster_id);
-          if (ownedPicksMap[ownerRid]) {
-            const pick = ownedPicksMap[ownerRid].find(
-              p => p.season === season && p.round === round && p.originalRid === origRid
-            );
-            if (pick && slot) pick.slot = slot;
-          }
+    const rookieDraft = drafts.find(d => d.type === 'snake' || d.type === 'linear');
+    if (rookieDraft?.draft_order) {
+      const draftSeason = String(rookieDraft.season || draftedSeason);
+      // Build uid→slot from draft_order
+      const uidToSlot = rookieDraft.draft_order; // { uid: slot }
+      // For each rid that has a 2026 pick originally theirs, assign slot
+      rids.forEach(rid => {
+        const rosterObj = rawRosterData[rid];
+        const uid = rosterObj?.owner_id;
+        const slot = uid && uidToSlot[uid] ? uidToSlot[uid] : null;
+        if (!slot) return;
+        // Assign slot to ALL picks in this season that have originalRid === rid
+        // (covers both own pick and picks this team received via trade)
+        Object.values(ownedPicksMap).forEach(picks => {
+          picks.forEach(p => {
+            if (p.season === draftSeason && p.originalRid === rid) {
+              p.slot = slot;
+            }
+          });
         });
-      } catch (e) { console.warn('Draft picks fetch failed:', e); }
+      });
     }
   } catch (e) { console.warn('fetchOwnedPicks failed:', e.message); }
 }
@@ -1229,10 +1253,13 @@ function buildRosterTableHTML(sleeperRoster, allPids, statsMap, rid) {
   // Picks
   if (picks.length) {
     html += sectionHeader('Draft Picks', picks.length);
+    const numTeams = Object.keys(rawRosterData).length || 14;
     picks.forEach(pick => {
-      const slotStr = pick.slot ? `Pick ${pick.slot}` : 'TBD';
-      const label   = `${pick.season} Round ${pick.round} — ${slotStr}`;
-      const fcVal   = getFCPickValue(pick.season, pick.round, pick.slot);
+      const roundNames = { 1: '1st', 2: '2nd', 3: '3rd' };
+      const rndStr  = roundNames[pick.round] || `${pick.round}th`;
+      const slotStr = pick.slot ? `Pick ${pick.slot} (${slotToBucket(pick.slot, numTeams)})` : 'TBD';
+      const label   = `${pick.season} ${rndStr} Round — ${slotStr}`;
+      const fcVal   = getFCPickValue(pick.season, pick.round, pick.slot, numTeams);
       const fcClass = fcVal > 5000 ? 'high' : fcVal > 1000 ? 'mid' : 'low';
       const origName = pick.originalRid !== rid
         ? (allManagers[rawRosterData[pick.originalRid]?.owner_id] || `Roster ${pick.originalRid}`)
