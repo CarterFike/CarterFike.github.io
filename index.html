@@ -1056,6 +1056,93 @@ async function fetchRosterSnapshot(txnId) {
   if (rows?.[0]?.snapshots) { rosterSnapshotCache[key] = rows[0].snapshots; return rows[0].snapshots; }
   return null;
 }
+// ─── WEEKLY SNAPSHOTS ─────────────────────────────────────────────────────────
+function getISOWeekKey() {
+  const now  = new Date();
+  // Only snapshot on Wednesday (3) or later in the week
+  if (now.getDay() < 3) return null;
+  // Compute ISO week number
+  const tmp  = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+  tmp.setUTCDate(tmp.getUTCDate() + 4 - (tmp.getUTCDay() || 7));
+  const year = tmp.getUTCFullYear();
+  const week = Math.ceil(((tmp - new Date(Date.UTC(year, 0, 1))) / 86400000 + 1) / 7);
+  return `${year}-W${String(week).padStart(2, '0')}`;
+}
+
+async function saveWeeklySnapshot(leagueId) {
+  const weekKey = getISOWeekKey();
+  if (!weekKey) {
+    console.log('[Weekly Snapshot] Skipped — not Wednesday or later');
+    return;
+  }
+  const txnId = `weekly:${leagueId}:${weekKey}`;
+
+  // Skip if already saved this week
+  if (existingSnapshotIds.has(txnId)) {
+    console.log('[Weekly Snapshot] Already saved for', weekKey);
+    return;
+  }
+
+  const numTeams   = Object.keys(rawRosterData).length || 14;
+  const rankings   = window._dashRankings || [];
+  const snapshots  = {};
+
+  for (const [rid, rosterObj] of Object.entries(rawRosterData)) {
+    const players   = (rosterObj.players || []).map(String);
+    const playerVal = players.reduce((s, pid) => s + getFCValue(pid), 0);
+    const picks     = (ownedPicksMap[rid] || []).map(p => ({
+      season: p.season, round: p.round, slot: p.slot,
+      originalRid: p.originalRid,
+      value: getAdjustedPickValue(p, numTeams).value
+    }));
+    const pickVal       = picks.reduce((s, p) => s + p.value, 0);
+    const sv            = computeTeamStarterValues(players);
+    const starterTotal  = sv.QB + sv.RB + sv.WR + sv.TE;
+    const rankEntry     = rankings.find(r => String(r.rid) === String(rid));
+    const uid           = rosterObj.owner_id;
+
+    snapshots[rid] = {
+      uid,
+      name:        allManagers[uid] || `Roster ${rid}`,
+      players,
+      playerVal,
+      picks,
+      pickVal,
+      total:       playerVal + pickVal,
+      starterTotal,
+      sv,
+      rank:        rankEntry?.rank        || null,
+      starterRank: rankEntry?.starterRank || null,
+      pickRank:    rankEntry?.pickRank    || null,
+      state:       rankEntry?.state       || null
+    };
+  }
+
+  // Determine NFL season/week context
+  const now    = new Date();
+  const season = String(now.getFullYear());
+  // Rough NFL week: season starts ~week 36 of year; offseason = week 0
+  const dayOfYear = Math.floor((now - new Date(now.getFullYear(), 0, 0)) / 86400000);
+  const nflWeek   = dayOfYear >= 248 && dayOfYear <= 365 ? Math.floor((dayOfYear - 248) / 7) + 1 : 0;
+
+  const row = {
+    txn_id:    txnId,
+    league_id: leagueId,
+    season,
+    week:      nflWeek,
+    snapshots,
+    created_at: new Date().toISOString()
+  };
+
+  try {
+    await sbUpsert('roster_snapshots', row);
+    existingSnapshotIds.add(txnId);
+    console.log(`[Weekly Snapshot] Saved ${txnId} — ${Object.keys(snapshots).length} teams`);
+  } catch (e) {
+    console.warn('[Weekly Snapshot] Save failed:', e);
+  }
+}
+
 async function storeCurrentRosters(leagueId, ridToUid) {
   const upserts = [];
   for (const [rid, playerSet] of Object.entries(rosterState)) {
@@ -1195,6 +1282,7 @@ async function loadLeague() {
       applyFilters();
       renderTradeGrades();
       renderDashboard();
+      saveWeeklySnapshot(leagueId);
       document.getElementById('dashboardContent').style.display = 'block';
       document.getElementById('dashboardEmpty').style.display    = 'none';
       document.getElementById('activityContent').style.display = 'block';
