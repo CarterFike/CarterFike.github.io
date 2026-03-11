@@ -899,7 +899,7 @@ function getFCPickValue(season, round, slot, numTeams) {
   const rnd = roundNames[round] || `${round}th`;
 
   if (slot !== null && slot !== undefined) {
-    // Slotted: "2026 Pick 1.07"
+    // Slotted: "2026 Pick 1.07" — exact value, no adjustment
     const padded = String(slot).padStart(2, '0');
     const key = `${season} Pick ${round}.${padded}`;
     if (fcPickValues[key]) return fcPickValues[key].value;
@@ -916,6 +916,33 @@ function getFCPickValue(season, round, slot, numTeams) {
   if (fcPickValues[key2]) return fcPickValues[key2].value;
 
   return 0;
+}
+
+// Returns { multiplier, rank, label, dir } for an unslotted pick from originalRid
+function getPickSourceAdjustment(originalRid) {
+  if (!originalRid) return { multiplier: 1, rank: null, label: '— (unknown source)', dir: 'neutral' };
+  // Use cached rankings if available to avoid infinite recursion
+  const rankings = window._dashRankings || window._dashRankingsGrid;
+  if (!rankings) return { multiplier: 1, rank: null, label: '— (loading...)', dir: 'neutral' };
+  const entry = rankings.find(r => String(r.rid) === String(originalRid));
+  if (!entry) return { multiplier: 1, rank: null, label: '— (unknown source)', dir: 'neutral' };
+  const rank = entry.starterRank;
+  let multiplier, label, dir;
+  if      (rank <= 3)  { multiplier = 0.75; label = `↓ -25% (STR #${rank} src)`; dir = 'down'; }
+  else if (rank <= 5)  { multiplier = 0.88; label = `↓ -12% (STR #${rank} src)`; dir = 'down'; }
+  else if (rank <= 9)  { multiplier = 1.00; label = `— (Mid src)`;                dir = 'neutral'; }
+  else if (rank <= 11) { multiplier = 1.15; label = `↑ +15% (STR #${rank} src)`; dir = 'up'; }
+  else                 { multiplier = 1.30; label = `↑ +30% (STR #${rank} src)`; dir = 'up'; }
+  return { multiplier, rank, label, dir };
+}
+
+// Adjusted value for a single pick object — applies source adjustment only to unslotted future picks
+function getAdjustedPickValue(pick, numTeams) {
+  const base = getFCPickValue(pick.season, pick.round, pick.slot, numTeams);
+  const isUnslotted = (pick.slot === null || pick.slot === undefined);
+  if (!isUnslotted) return { value: base, adj: null };
+  const adj = getPickSourceAdjustment(pick.originalRid);
+  return { value: Math.round(base * adj.multiplier), adj };
 }
 
 // ─── ROSTER STATE ─────────────────────────────────────────────────────────────
@@ -977,7 +1004,7 @@ function buildSnapshotForTrade(leagueId, trade, ridToUid, uidToName) {
     const players = [...playerSet];
     const pickVal = (ownedPicksMap[rid] || []).reduce((s, p) => {
       const nt = Object.keys(rawRosterData).length || 14;
-      return s + getFCPickValue(p.season, p.round, p.slot, nt);
+      return s + getAdjustedPickValue(p, nt).value;
     }, 0);
     const total   = players.reduce((s, pid) => s + getFCValue(pid), 0) + pickVal;
     const sv      = computeStarterValues(players);
@@ -1311,35 +1338,52 @@ function computeTeamDepthValues(playerArr) {
 
 function getPickValueForRoster(rid) {
   const numTeams = Object.keys(rawRosterData).length || 14;
-  return (ownedPicksMap[rid] || []).reduce((s, p) => s + getFCPickValue(p.season, p.round, p.slot, numTeams), 0);
+  return (ownedPicksMap[rid] || []).reduce((s, p) => s + getAdjustedPickValue(p, numTeams).value, 0);
 }
 function computeAllTeamRankings() {
+  const numTeams = Object.keys(rawRosterData).length || 14;
+
+  // ── PASS 1: build teams with player values + unadjusted pick values ─────────
   const teams = [];
   for (const [rid, rosterObj] of Object.entries(rawRosterData)) {
-    const players = (rosterObj.players || []).map(String);
-    const total   = players.reduce((s, pid) => s + getFCValue(pid), 0) + getPickValueForRoster(rid);
-    const sv      = computeTeamStarterValues(players);
-    const dv      = computeTeamDepthValues(players);
+    const players  = (rosterObj.players || []).map(String);
+    const playerVal = players.reduce((s, pid) => s + getFCValue(pid), 0);
+    // Unadjusted picks (slot-based exact, unslotted uses base FC median)
+    const rawPickVal = (ownedPicksMap[rid] || []).reduce((s, p) => s + getFCPickValue(p.season, p.round, p.slot, numTeams), 0);
+    const sv       = computeTeamStarterValues(players);
+    const dv       = computeTeamDepthValues(players);
     const starterTotal = sv.QB + sv.RB + sv.WR + sv.TE;
-    const uid     = rosterObj.owner_id;
-    teams.push({ rid, uid, name: allManagers[uid] || `Roster ${rid}`, total, sv, dv, starterTotal });
+    const uid      = rosterObj.owner_id;
+    teams.push({ rid, uid, name: allManagers[uid] || `Roster ${rid}`, playerVal, rawPickVal, sv, dv, starterTotal });
   }
+
+  // Establish starter rankings from pass 1 so pick adjustments can use them
+  const byStarter1 = [...teams].sort((a, b) => b.starterTotal - a.starterTotal);
+  byStarter1.forEach((t, i) => { t.starterRank = i + 1; });
+
+  // Cache a minimal rankings array so getPickSourceAdjustment can resolve ranks
+  window._dashRankings = teams.map(t => ({ rid: t.rid, rank: 0, starterRank: t.starterRank }));
+
+  // ── PASS 2: recompute pick totals with source adjustments ────────────────────
+  teams.forEach(t => {
+    t.pickTotal = (ownedPicksMap[t.rid] || []).reduce((s, p) => s + getAdjustedPickValue(p, numTeams).value, 0);
+    t.total = t.playerVal + t.pickTotal;
+  });
+
+  // Final overall sort
   teams.sort((a, b) => b.total - a.total);
-  const n = teams.length || 1;
   teams.forEach((t, i) => {
     t.rank  = i + 1;
     t.state = i < 4 ? 'Contention' : i < 10 ? 'Transition' : 'Rebuild';
   });
-  // Starter rank (by sum of starter values)
+  // Starter rank
   const byStarter = [...teams].sort((a, b) => b.starterTotal - a.starterTotal);
   byStarter.forEach((t, i) => { t.starterRank = i + 1; });
-  // Pick rank (by sum of owned pick FC values)
-  teams.forEach(t => {
-    t.pickTotal = getPickValueForRoster(t.rid);
-  });
+  // Pick rank
   const byPicks = [...teams].sort((a, b) => b.pickTotal - a.pickTotal);
   byPicks.forEach((t, i) => { t.pickRank = i + 1; });
   // League averages — starters
+  const n = teams.length || 1;
   leagueAvgStarters = { QB: 0, RB: 0, WR: 0, TE: 0 };
   teams.forEach(t => ['QB','RB','WR','TE'].forEach(p => { leagueAvgStarters[p] += t.sv[p]; }));
   ['QB','RB','WR','TE'].forEach(p => { leagueAvgStarters[p] = Math.round(leagueAvgStarters[p] / n); });
@@ -1643,17 +1687,21 @@ function buildRosterTableHTML(sleeperRoster, allPids, statsMap, rid) {
       const rndStr  = roundNames[pick.round] || `${pick.round}th`;
       const slotStr = pick.slot ? `Pick ${pick.slot} (${slotToBucket(pick.slot, numTeams)})` : 'TBD';
       const label   = `${pick.season} ${rndStr} Round — ${slotStr}`;
-      const fcVal   = getFCPickValue(pick.season, pick.round, pick.slot, numTeams);
+      const { value: fcVal, adj } = getAdjustedPickValue(pick, numTeams);
       const fcClass = fcVal > 5000 ? 'high' : fcVal > 1000 ? 'mid' : 'low';
       const origName = pick.originalRid !== rid
         ? (allManagers[rawRosterData[pick.originalRid]?.owner_id] || `Roster ${pick.originalRid}`)
         : 'Own pick';
+      const adjColor = adj ? (adj.dir === 'up' ? 'var(--accent)' : adj.dir === 'down' ? 'var(--accent2)' : 'var(--muted)') : '';
+      const adjHtml  = adj
+        ? `<div style="font-family:'DM Mono',monospace;font-size:0.65rem;color:${adjColor};margin-top:0.15rem;">${adj.label}</div>`
+        : '';
       html += `<tr>
         <td><span class="pos-tag pos-PICK">PICK</span></td>
         <td><span class="pick-label">${label}</span><div class="pick-detail">${origName}</div></td>
         <td style="color:var(--text2);font-size:0.8rem;">—</td>
         <td style="color:var(--text2);font-size:0.8rem;">—</td>
-        <td><span class="fc-val ${fcClass}">${fcVal > 0 ? fcVal.toLocaleString() : '—'}</span></td>
+        <td><span class="fc-val ${fcClass}">${fcVal > 0 ? fcVal.toLocaleString() : '—'}</span>${adjHtml}</td>
         <td><span class="trend-cell flat">—</span></td>
         <td><span class="stat-pct neutral">—</span></td>
         <td><span class="trend-cell flat">—</span></td>
