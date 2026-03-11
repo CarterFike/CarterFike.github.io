@@ -1029,11 +1029,13 @@ async function loadLeague() {
 
       for (let week = 0; week <= 18; week++) {
         const txns = await api(`${BASE}/league/${lid}/transactions/${week}`);
-        if (season === latestSeason && txns?.length) {
+        if (txns?.length) {
           console.log(`[TXN DEBUG] ${season} week ${week}: ${txns.length} txns`);
-          txns.forEach(t => {
-            console.log(`  txn ${t.transaction_id} | type=${t.type} | status=${t.status} | roster_ids=${JSON.stringify(t.roster_ids)} | adds=${JSON.stringify(t.adds)} | drops=${JSON.stringify(t.drops)}`);
-          });
+          if (season === '2026') {
+            txns.forEach(t => {
+              console.log(`  [2026] txn ${t.transaction_id} | type=${t.type} | status=${t.status} | roster_ids=${JSON.stringify(t.roster_ids)} | adds=${JSON.stringify(t.adds)} | drops=${JSON.stringify(t.drops)}`);
+            });
+          }
         }
         if (!txns?.length) continue;
 
@@ -1054,6 +1056,8 @@ async function loadLeague() {
               else if (p.previous_owner_id === rid) dropped.push(d);
             });
             allTxns.push({ season, week, type, uid, managerName, canonicalName, added, dropped });
+            if (season === '2026') console.log(`[PUSH] season=${season} wk=${week} type=${type} status=${txn.status} rid=${rid} uid=${uid} canonicalName=${canonicalName} added=${JSON.stringify(added)} dropped=${JSON.stringify(dropped)}`);
+            if (season === '2026') console.log(`[PUSH] ${canonicalName} | type=${type} | week=${week} | added=${JSON.stringify(added)} | dropped=${JSON.stringify(dropped)}`);
           }
 
           if (type === 'trade') {
@@ -1075,6 +1079,8 @@ async function loadLeague() {
       }
     }
 
+    console.log('[TXN DEBUG] allTxns total after load:', allTxns.length, '| 2026 txns:', allTxns.filter(t=>t.season==='2026').length);
+    console.log(`[TOTALS] allTxns.length=${allTxns.length} | 2026 txns=${allTxns.filter(t=>t.season==='2026').length}`);
     // Fetch current-season full roster details + league settings + picks for Teams page
     setProgress(94, 'Loading current rosters...');
     try {
@@ -1097,6 +1103,7 @@ async function loadLeague() {
     await storeCurrentRosters(leagueId, lastRidToUid);
 
     setProgress(100, 'Done!');
+    console.log('[LOAD COMPLETE] allTxns total:', allTxns.length, '| 2026 count:', allTxns.filter(t=>t.season==='2026').length);
     setTimeout(() => {
       document.getElementById('progressWrap').style.display = 'none';
       populateFilters();
