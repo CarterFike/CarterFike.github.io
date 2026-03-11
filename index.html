@@ -1468,7 +1468,7 @@ function buildRosterTableHTML(sleeperRoster, allPids, statsMap, rid) {
   let html = `<div style="overflow-x:auto;"><table>
     <thead><tr>
       <th>Pos</th><th>Player</th><th>Team</th><th>Age</th>
-      <th>FC Value</th><th>vs Pos Avg</th><th>L4 Trend</th>
+      <th>FC Value</th><th>FC 30d</th><th>vs Pos Avg</th><th>L4 Trend</th>
     </tr></thead><tbody>`;
 
   function playerRow(pid, slotLabel) {
@@ -1479,6 +1479,12 @@ function buildRosterTableHTML(sleeperRoster, allPids, statsMap, rid) {
     const stats   = statsMap[pid];
     const posCls  = ['QB','RB','WR','TE','K','DEF'].includes(pos) ? `pos-${pos}` : 'pos-other';
     const fcClass = fcVal > 5000 ? 'high' : fcVal > 1000 ? 'mid' : 'low';
+
+    const trend30 = fcValues[String(pid)]?.trend30Day || 0;
+    let fc30dHTML;
+    if (trend30 > 0)       fc30dHTML = `<span class="trend-cell up">▲ +${trend30.toLocaleString()}</span>`;
+    else if (trend30 < 0)  fc30dHTML = `<span class="trend-cell down">▼ ${trend30.toLocaleString()}</span>`;
+    else                   fc30dHTML = `<span class="trend-cell flat">—</span>`;
 
     let vsHTML = '<span class="stat-pct neutral">—</span>';
     if (stats && stats.games > 0 && stats.vsAvgPct !== null) {
@@ -1508,13 +1514,14 @@ function buildRosterTableHTML(sleeperRoster, allPids, statsMap, rid) {
       <td style="color:var(--text2);font-size:0.8rem;">${nflTeam}</td>
       <td style="color:var(--text2);font-size:0.8rem;">${age || '—'}</td>
       <td><span class="fc-val ${fcClass}">${fcVal > 0 ? fcVal.toLocaleString() : '—'}</span></td>
+      <td>${fc30dHTML}</td>
       <td>${vsHTML}</td>
       <td>${trendHTML}</td>
     </tr>`;
   }
 
   function sectionHeader(label, count) {
-    return `<tr><td colspan="7" style="padding:0;">
+    return `<tr><td colspan="8" style="padding:0;">
       <div class="roster-section-header">${label} <span>${count}</span></div>
     </td></tr>`;
   }
@@ -1563,6 +1570,7 @@ function buildRosterTableHTML(sleeperRoster, allPids, statsMap, rid) {
         <td style="color:var(--text2);font-size:0.8rem;">—</td>
         <td style="color:var(--text2);font-size:0.8rem;">—</td>
         <td><span class="fc-val ${fcClass}">${fcVal > 0 ? fcVal.toLocaleString() : '—'}</span></td>
+        <td><span class="trend-cell flat">—</span></td>
         <td><span class="stat-pct neutral">—</span></td>
         <td><span class="trend-cell flat">—</span></td>
       </tr>`;
