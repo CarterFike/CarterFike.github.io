@@ -542,7 +542,7 @@
         <div class="table-header"><h2>Transaction Log</h2><span id="txnCount"></span></div>
         <div style="overflow-x:auto;">
           <table>
-            <thead><tr><th>Season</th><th>Wk</th><th>Type</th><th>Manager</th><th>Added</th><th>Dropped / Sent</th></tr></thead>
+            <thead><tr><th>Date</th><th>Type</th><th>Manager</th><th>Added</th><th>Dropped / Sent</th></tr></thead>
             <tbody id="txnBody"></tbody>
           </table>
         </div>
@@ -1029,14 +1029,6 @@ async function loadLeague() {
 
       for (let week = 0; week <= 18; week++) {
         const txns = await api(`${BASE}/league/${lid}/transactions/${week}`);
-        if (txns?.length) {
-          console.log(`[TXN DEBUG] ${season} week ${week}: ${txns.length} txns`);
-          if (season === '2026') {
-            txns.forEach(t => {
-              console.log(`  [2026] txn ${t.transaction_id} | type=${t.type} | status=${t.status} | roster_ids=${JSON.stringify(t.roster_ids)} | adds=${JSON.stringify(t.adds)} | drops=${JSON.stringify(t.drops)}`);
-            });
-          }
-        }
         if (!txns?.length) continue;
 
         for (const txn of txns) {
@@ -1055,9 +1047,7 @@ async function loadLeague() {
               if (p.owner_id === rid) added.push(d);
               else if (p.previous_owner_id === rid) dropped.push(d);
             });
-            allTxns.push({ season, week, type, uid, managerName, canonicalName, added, dropped });
-            if (season === '2026') console.log(`[PUSH] season=${season} wk=${week} type=${type} status=${txn.status} rid=${rid} uid=${uid} canonicalName=${canonicalName} added=${JSON.stringify(added)} dropped=${JSON.stringify(dropped)}`);
-            if (season === '2026') console.log(`[PUSH] ${canonicalName} | type=${type} | week=${week} | added=${JSON.stringify(added)} | dropped=${JSON.stringify(dropped)}`);
+            allTxns.push({ season, week, type, uid, managerName, canonicalName, added, dropped, created: txn.created || null });
           }
 
           if (type === 'trade') {
@@ -1078,9 +1068,6 @@ async function loadLeague() {
         }
       }
     }
-
-    console.log('[TXN DEBUG] allTxns total after load:', allTxns.length, '| 2026 txns:', allTxns.filter(t=>t.season==='2026').length);
-    console.log(`[TOTALS] allTxns.length=${allTxns.length} | 2026 txns=${allTxns.filter(t=>t.season==='2026').length}`);
     // Fetch current-season full roster details + league settings + picks for Teams page
     setProgress(94, 'Loading current rosters...');
     try {
@@ -1141,6 +1128,16 @@ async function getIdMaps(lid) {
   users.forEach(u => { uidToName[u.user_id] = u.display_name || u.user_id; });
   rosters.forEach(r => { ridToUid[r.roster_id] = r.owner_id; });
   return [ridToUid, uidToName];
+}
+function formatTxnDate(ms) {
+  const d = new Date(ms);
+  const mon = d.toLocaleString('en-US', { month: 'short' });
+  const day = d.getDate();
+  const yr  = d.getFullYear();
+  const h   = d.getHours() % 12 || 12;
+  const min = String(d.getMinutes()).padStart(2, '0');
+  const ampm = d.getHours() >= 12 ? 'pm' : 'am';
+  return `${mon} ${day}, ${yr} ${h}:${min}${ampm}`;
 }
 function playerLabel(pid) {
   const p = allPlayers[String(pid)];
@@ -1836,10 +1833,10 @@ function renderTable(txns) {
   document.getElementById('txnCount').textContent = `${txns.length} transactions`;
   const typeLabel  = { trade: 'Trade', waiver: 'Waiver', free_agent: 'FA' };
   const badgeClass = { trade: 'badge-trade', waiver: 'badge-waiver', free_agent: 'badge-free_agent' };
-  document.getElementById('txnBody').innerHTML = [...txns].reverse().map(t => `
+  const sorted = [...txns].sort((a, b) => (b.created || 0) - (a.created || 0));
+  document.getElementById('txnBody').innerHTML = sorted.map(t => `
     <tr>
-      <td><span class="season-tag">${t.season}</span></td>
-      <td><span class="season-tag">${t.week}</span></td>
+      <td style="font-family:'DM Mono',monospace;font-size:0.75rem;color:var(--text2);white-space:nowrap;">${t.created ? formatTxnDate(t.created) : t.season + ' Wk' + t.week}</td>
       <td><span class="badge ${badgeClass[t.type]||''}">${typeLabel[t.type]||t.type}</span></td>
       <td>
         <div class="team-name">${t.canonicalName}</div>
