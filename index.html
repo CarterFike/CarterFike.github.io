@@ -457,6 +457,26 @@
     font-family: 'DM Mono', monospace; font-size: 0.8rem;
   }
 
+/* ── WAIVERS ─────────────────────────────────────── */
+  .wav-pos-btn {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text2);
+    font-family: 'DM Mono', monospace;
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.35rem 0.85rem;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s;
+    letter-spacing: 0.04em;
+  }
+  .wav-pos-btn:hover { border-color: var(--accent); color: var(--text1); }
+  .wav-pos-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .wav-trend-up   { color: #4caf88; font-weight: 600; }
+  .wav-trend-down { color: #e05252; font-weight: 600; }
+  .wav-trend-flat { color: var(--muted); }
+
 </style>
 </head>
 <body>
@@ -470,6 +490,7 @@
   <div class="tabs">
     <div class="tab active" onclick="switchTab('activity')">Activity</div>
     <div class="tab" onclick="switchTab('teams')">Teams</div>
+    <div class="tab" onclick="switchTab('waivers')">Secrets</div>
     <div class="tab" onclick="switchTab('articles')">War Room</div>
     <div class="tab" onclick="switchTab('trades')">Trade Grades</div>
   </div>
@@ -544,6 +565,45 @@
 
 
   <!-- ARTICLES TAB -->
+
+  <!-- WAIVERS TAB -->
+  <div class="tab-panel" id="panel-waivers">
+    <div id="waiversLocked" class="status" style="display:flex;flex-direction:column;align-items:center;gap:1rem;">
+      <div style="font-size:2rem;">🔒</div>
+      <div style="font-family:'DM Mono',monospace;font-size:0.85rem;color:var(--muted);">Restricted access</div>
+      <button class="btn btn-sm" onclick="unlockWaivers()">Enter Password</button>
+    </div>
+    <div id="waiversContent" style="display:none;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem;flex-wrap:wrap;gap:0.75rem;">
+        <div style="display:flex;gap:0.5rem;">
+          <button class="wav-pos-btn active" data-pos="ALL" onclick="setWavPos(this,'ALL')">ALL</button>
+          <button class="wav-pos-btn" data-pos="QB"  onclick="setWavPos(this,'QB')">QB</button>
+          <button class="wav-pos-btn" data-pos="RB"  onclick="setWavPos(this,'RB')">RB</button>
+          <button class="wav-pos-btn" data-pos="WR"  onclick="setWavPos(this,'WR')">WR</button>
+          <button class="wav-pos-btn" data-pos="TE"  onclick="setWavPos(this,'TE')">TE</button>
+        </div>
+        <span id="wavTotalCount" style="font-family:'DM Mono',monospace;font-size:0.75rem;color:var(--muted);"></span>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden;">
+        <div style="overflow-x:auto;">
+          <table>
+            <thead><tr>
+              <th style="width:2.5rem;">#</th>
+              <th style="width:3.5rem;">Pos</th>
+              <th>Player</th>
+              <th>NFL Team</th>
+              <th>Age</th>
+              <th>FC Value</th>
+              <th>30d Trend</th>
+            </tr></thead>
+            <tbody id="wavBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div id="waiversEmpty" class="status" style="display:none;">Load your league first using the input above</div>
+  </div>
+
   <div class="tab-panel" id="panel-articles">
     <div id="articlesContent">
       <!-- Editor (hidden until unlocked) -->
@@ -590,6 +650,7 @@
       <div id="articlesList"></div>
     </div>
   </div>
+
 
   <!-- TRADE GRADES TAB -->
   <div class="tab-panel" id="panel-trades">
@@ -700,11 +761,12 @@ function setProgress(pct, label) {
 // ─── TABS ─────────────────────────────────────────────────────────────────────
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach((t, i) => {
-    t.classList.toggle('active', ['activity','teams','articles','trades'][i] === name);
+    t.classList.toggle('active', ['activity','teams','waivers','articles','trades'][i] === name);
   });
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   document.getElementById('panel-' + name).classList.add('active');
   if (name === 'articles' && typeof loadArticles === 'function') loadArticles();
+  if (name === 'waivers') renderWaivers();
 }
 
 // ─── FANTASYCALC ─────────────────────────────────────────────────────────────
@@ -1038,6 +1100,7 @@ async function loadLeague() {
       document.getElementById('activityContent').style.display = 'block';
       document.getElementById('tradesContent').style.display   = 'block';
       document.getElementById('teamsContent').style.display    = 'block';
+      // waiversContent stays hidden behind password — nothing to do here
     }, 300);
 
   } catch (e) {
@@ -2007,6 +2070,113 @@ async function deleteArticle(id) {
     if (r.ok) await loadArticles();
     else alert('Delete failed.');
   } catch (e) { alert('Delete error: ' + e.message); }
+}
+
+
+// ─── WAIVERS ──────────────────────────────────────────────────────────────────
+const WAV_PASSWORD    = 'pwner126';
+let   wavUnlocked     = false;
+let   wavPosFilter    = 'ALL';
+
+function unlockWaivers() {
+  const pw = prompt('Password:');
+  if (pw === WAV_PASSWORD) {
+    wavUnlocked = true;
+    document.getElementById('waiversLocked').style.display  = 'none';
+    document.getElementById('waiversContent').style.display = 'block';
+    renderWaivers();
+  } else if (pw !== null) {
+    alert('Incorrect password.');
+  }
+}
+
+function setWavPos(btn, pos) {
+  wavPosFilter = pos;
+  document.querySelectorAll('.wav-pos-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderWaivers();
+}
+
+function renderWaivers() {
+  const bodyEl   = document.getElementById('wavBody');
+  const countEl  = document.getElementById('wavTotalCount');
+  if (!bodyEl) return;
+
+  // Not loaded yet
+  if (!Object.keys(rawRosterData).length) return;
+
+  const POSITIONS = ['QB','RB','WR','TE'];
+
+  // Build rostered set
+  const rostered = new Set();
+  Object.values(rawRosterData).forEach(r => {
+    (r.players || []).forEach(id => rostered.add(String(id)));
+    (r.taxi    || []).forEach(id => rostered.add(String(id)));
+    (r.reserve || []).forEach(id => rostered.add(String(id)));
+  });
+
+  // All available players with value
+  const allAvail = Object.keys(fcValues)
+    .filter(pid => {
+      if (rostered.has(pid)) return false;
+      const pos = playerPos(pid);
+      if (!POSITIONS.includes(pos)) return false;
+      return fcValues[pid].value > 0;
+    })
+    .map(pid => {
+      const fv = fcValues[pid];
+      return {
+        pid,
+        pos:     playerPos(pid),
+        name:    playerName(pid),
+        team:    playerTeam(pid),
+        age:     playerAge(pid),
+        val:     fv.value || 0,
+        trend:   fv.trend30Day || 0,
+        posRank: fv.positionRank || null,
+        ovRank:  fv.overallRank  || null
+      };
+    })
+    .sort((a, b) => b.val - a.val);
+
+  countEl.textContent = `${allAvail.length} players available`;
+
+  const filtered = wavPosFilter === 'ALL'
+    ? allAvail
+    : allAvail.filter(p => p.pos === wavPosFilter);
+
+  const shown = filtered.slice(0, 50);
+
+  if (!shown.length) {
+    bodyEl.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:2rem;color:var(--muted);font-family:'DM Mono',monospace;font-size:0.8rem;">No players found</td></tr>`;
+    return;
+  }
+
+  bodyEl.innerHTML = shown.map((p, i) => {
+    const posCls  = POSITIONS.includes(p.pos) ? `pos-${p.pos}` : 'pos-other';
+    const fcClass = p.val >= 5000 ? 'high' : p.val >= 1000 ? 'mid' : 'low';
+
+    let trendHtml;
+    if (p.trend > 0) {
+      trendHtml = `<span class="wav-trend-up">▲ +${p.trend.toLocaleString()}</span>`;
+    } else if (p.trend < 0) {
+      trendHtml = `<span class="wav-trend-down">▼ ${p.trend.toLocaleString()}</span>`;
+    } else {
+      trendHtml = `<span class="wav-trend-flat">—</span>`;
+    }
+
+    const rankStr = p.posRank ? `${p.pos}${p.posRank}` : (p.ovRank ? `#${p.ovRank}` : '—');
+
+    return `<tr>
+      <td style="color:var(--muted);font-family:'DM Mono',monospace;font-size:0.75rem;">${i + 1}</td>
+      <td><span class="pos-tag ${posCls}">${p.pos}</span></td>
+      <td style="font-weight:500;">${p.name}</td>
+      <td style="color:var(--text2);font-size:0.82rem;">${p.team || '—'}</td>
+      <td style="color:var(--text2);font-size:0.82rem;font-family:'DM Mono',monospace;">${p.age || '—'}</td>
+      <td><span class="fc-val ${fcClass}">${p.val.toLocaleString()}</span></td>
+      <td style="font-size:0.82rem;font-family:'DM Mono',monospace;">${trendHtml}</td>
+    </tr>`;
+  }).join('');
 }
 
 </script>
