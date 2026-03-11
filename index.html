@@ -1030,7 +1030,10 @@ async function loadLeague() {
       for (let week = 0; week <= 18; week++) {
         const txns = await api(`${BASE}/league/${lid}/transactions/${week}`);
         if (season === latestSeason && txns?.length) {
-          console.log(`[TXN DEBUG] ${season} week ${week}: ${txns.length} txns`, txns.map(t => ({ id: t.transaction_id, type: t.type, status: t.status, adds: t.adds, drops: t.drops })));
+          console.log(`[TXN DEBUG] ${season} week ${week}: ${txns.length} txns`);
+          txns.forEach(t => {
+            console.log(`  txn ${t.transaction_id} | type=${t.type} | status=${t.status} | roster_ids=${JSON.stringify(t.roster_ids)} | adds=${JSON.stringify(t.adds)} | drops=${JSON.stringify(t.drops)}`);
+          });
         }
         if (!txns?.length) continue;
 
