@@ -1027,7 +1027,7 @@ async function loadLeague() {
         if (!rosterState[String(rid)]) rosterState[String(rid)] = new Set();
       }
 
-      for (let week = 1; week <= 18; week++) {
+      for (let week = 0; week <= 18; week++) {
         const txns = await api(`${BASE}/league/${lid}/transactions/${week}`);
         if (!txns?.length) continue;
 
