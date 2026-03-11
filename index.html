@@ -477,6 +477,22 @@
   .wav-trend-down { color: #e05252; font-weight: 600; }
   .wav-trend-flat { color: var(--muted); }
 
+
+  .sort-rank-btn {
+    background: var(--card);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-family: 'DM Mono', monospace;
+    font-size: 0.68rem;
+    padding: 0.25rem 0.6rem;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .sort-rank-btn:hover { color: var(--text); border-color: var(--accent); }
+  .sort-rank-btn.active-sort { color: var(--accent); border-color: var(--accent); background: rgba(100,220,200,0.08); }
 </style>
 </head>
 <body>
@@ -521,9 +537,17 @@
       <div id="dashMovers" style="margin-bottom:1.5rem;"></div>
 
       <!-- SECTION 2: SMALL MULTIPLES GRID -->
-      <div style="margin-bottom:0.75rem;display:flex;align-items:baseline;gap:0.75rem;">
-        <h2 style="font-family:'Bebas Neue',sans-serif;font-size:1.4rem;letter-spacing:0.05em;">All Teams</h2>
-        <span style="font-family:'DM Mono',monospace;font-size:0.72rem;color:var(--muted);">click any card to view full roster</span>
+      <div style="margin-bottom:0.75rem;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.5rem;">
+        <div style="display:flex;align-items:baseline;gap:0.75rem;">
+          <h2 style="font-family:'Bebas Neue',sans-serif;font-size:1.4rem;letter-spacing:0.05em;">All Teams</h2>
+          <span style="font-family:'DM Mono',monospace;font-size:0.72rem;color:var(--muted);">click any card to view full roster</span>
+        </div>
+        <div style="display:flex;gap:0.4rem;align-items:center;">
+          <span style="font-family:'DM Mono',monospace;font-size:0.6rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;margin-right:0.2rem;">Sort</span>
+          <button id="gridSortOverall"  onclick="setGridSort('overall')"  class="sort-rank-btn active-sort">Overall</button>
+          <button id="gridSortStarters" onclick="setGridSort('starters')" class="sort-rank-btn">Starters</button>
+          <button id="gridSortPicks"    onclick="setGridSort('picks')"    class="sort-rank-btn">Picks</button>
+        </div>
       </div>
       <div id="dashGrid" style="
         display:grid;
@@ -536,7 +560,11 @@
       <div class="table-wrap">
         <div class="table-header">
           <h2>Power Rankings</h2>
-          <span>By total FC roster value</span>
+          <div style="display:flex;gap:0.4rem;align-items:center;">
+            <button id="sortOverall" onclick="setRankSort('overall')" class="sort-rank-btn active-sort">Overall</button>
+            <button id="sortStarters" onclick="setRankSort('starters')" class="sort-rank-btn">Starters</button>
+            <button id="sortPicks" onclick="setRankSort('picks')" class="sort-rank-btn">Picks</button>
+          </div>
         </div>
         <div id="dashRankings"></div>
         <div style="padding:0.75rem 1.5rem;border-top:1px solid var(--border);font-family:'DM Mono',monospace;font-size:0.68rem;color:var(--muted);">
@@ -947,7 +975,11 @@ function buildSnapshotForTrade(leagueId, trade, ridToUid, uidToName) {
   const allTeamData = {};
   for (const [rid, playerSet] of Object.entries(rosterState)) {
     const players = [...playerSet];
-    const total   = players.reduce((s, pid) => s + getFCValue(pid), 0);
+    const pickVal = (ownedPicksMap[rid] || []).reduce((s, p) => {
+      const nt = Object.keys(rawRosterData).length || 14;
+      return s + getFCPickValue(p.season, p.round, p.slot, nt);
+    }, 0);
+    const total   = players.reduce((s, pid) => s + getFCValue(pid), 0) + pickVal;
     const sv      = computeStarterValues(players);
     allTeamData[rid] = { total, sv, players };
   }
@@ -1277,11 +1309,15 @@ function computeTeamDepthValues(playerArr) {
   };
 }
 
+function getPickValueForRoster(rid) {
+  const numTeams = Object.keys(rawRosterData).length || 14;
+  return (ownedPicksMap[rid] || []).reduce((s, p) => s + getFCPickValue(p.season, p.round, p.slot, numTeams), 0);
+}
 function computeAllTeamRankings() {
   const teams = [];
   for (const [rid, rosterObj] of Object.entries(rawRosterData)) {
     const players = (rosterObj.players || []).map(String);
-    const total   = players.reduce((s, pid) => s + getFCValue(pid), 0);
+    const total   = players.reduce((s, pid) => s + getFCValue(pid), 0) + getPickValueForRoster(rid);
     const sv      = computeTeamStarterValues(players);
     const dv      = computeTeamDepthValues(players);
     const starterTotal = sv.QB + sv.RB + sv.WR + sv.TE;
@@ -1297,6 +1333,12 @@ function computeAllTeamRankings() {
   // Starter rank (by sum of starter values)
   const byStarter = [...teams].sort((a, b) => b.starterTotal - a.starterTotal);
   byStarter.forEach((t, i) => { t.starterRank = i + 1; });
+  // Pick rank (by sum of owned pick FC values)
+  teams.forEach(t => {
+    t.pickTotal = getPickValueForRoster(t.rid);
+  });
+  const byPicks = [...teams].sort((a, b) => b.pickTotal - a.pickTotal);
+  byPicks.forEach((t, i) => { t.pickRank = i + 1; });
   // League averages — starters
   leagueAvgStarters = { QB: 0, RB: 0, WR: 0, TE: 0 };
   teams.forEach(t => ['QB','RB','WR','TE'].forEach(p => { leagueAvgStarters[p] += t.sv[p]; }));
@@ -1330,7 +1372,7 @@ async function renderTeamDetail() {
   const team = rankings.find(t => t.rid === rid);
   if (!team) return;
 
-  const totalFC = (rawRosterData[rid]?.players || []).reduce((s, pid) => s + getFCValue(pid), 0);
+  const totalFC = (rawRosterData[rid]?.players || []).reduce((s, pid) => s + getFCValue(pid), 0) + getPickValueForRoster(rid);
 
   document.getElementById('teamDetail').innerHTML = `
     <div class="team-header-card">
@@ -1346,6 +1388,7 @@ async function renderTeamDetail() {
         <div class="team-total-value">${Math.round(totalFC).toLocaleString()}</div>
         <div style="font-family:'DM Mono',monospace;font-size:0.7rem;color:var(--muted);margin-top:0.3rem;">
           Starter Rank <span style="color:var(--text2);">#${team.starterRank} of ${rankings.length}</span>
+          &nbsp;·&nbsp; Pick Rank <span style="color:var(--text2);">#${team.pickRank} of ${rankings.length}</span>
         </div>
       </div>
     </div>
@@ -2283,7 +2326,7 @@ function renderDashboard() {
   const riser   = rankings.find(t => t.rid === riserRid)   || top;
   const dropper = rankings.find(t => t.rid === dropperRid) || bottom;
 
-  const stateClass = s => ({ Contention: 'state-contention', Transition: 'state-transition', Rebuild: 'state-rebuild' }[s] || '');
+  if (!window.stateClass) window.stateClass = s => ({ Contention: 'state-contention', Transition: 'state-transition', Rebuild: 'state-rebuild' }[s] || '');
 
   document.getElementById('dashMovers').innerHTML = `
     <div style="
@@ -2316,40 +2359,108 @@ function renderDashboard() {
   // ── SECTION 2: SMALL MULTIPLES GRID ───────────────────────────────────────
   const borderColor = { Contention: 'var(--accent)', Transition: 'var(--yellow)', Rebuild: 'var(--accent2)' };
 
-  document.getElementById('dashGrid').innerHTML = rankings.map(t => `
+  window._dashRankingsGrid = rankings;
+  renderGridCards(window._gridSort || 'overall');
+
+  // ── SECTION 3: POWER RANKINGS ──────────────────────────────────────────────
+  window._dashRankings = rankings;
+  renderRankingsTable(window._rankSort || 'overall');
+}
+
+let _gridSort = 'overall';
+function setGridSort(key) {
+  _gridSort = key;
+  ['Overall','Starters','Picks'].forEach(k => {
+    const el = document.getElementById('gridSort' + k);
+    if (el) el.classList.toggle('active-sort', k.toLowerCase() === key);
+  });
+  renderGridCards(key);
+}
+
+function renderGridCards(sortKey) {
+  const rankings = window._dashRankingsGrid;
+  if (!rankings) return;
+  const borderColor = { Contention: 'var(--accent)', Transition: 'var(--yellow)', Rebuild: 'var(--accent2)' };
+  const sorted = [...rankings].sort((a, b) => {
+    if (sortKey === 'starters') return b.starterTotal - a.starterTotal;
+    if (sortKey === 'picks')    return b.pickTotal   - a.pickTotal;
+    return b.total - a.total;
+  });
+  document.getElementById('dashGrid').innerHTML = sorted.map((t, i) => {
+    const sortedRank = i + 1;
+    const hlOvr = sortKey === 'overall'  ? 'color:var(--accent);' : 'color:var(--text2);';
+    const hlStr = sortKey === 'starters' ? 'color:var(--accent);' : 'color:var(--text2);';
+    const hlPks = sortKey === 'picks'    ? 'color:var(--accent);' : 'color:var(--text2);';
+    const primaryVal   = sortKey === 'starters' ? t.starterTotal : sortKey === 'picks' ? t.pickTotal : t.total;
+    const primaryLabel = sortKey === 'starters' ? 'Starter Value' : sortKey === 'picks' ? 'Pick Value' : 'Total FC Value';
+    return `
     <div onclick="switchTab('teams'); setTimeout(() => { document.getElementById('teamSelect').value='${t.rid}'; renderTeamDetail(); }, 50);"
-      style="
-        background:var(--card); border:1px solid var(--border);
-        border-left:3px solid ${borderColor[t.state] || 'var(--border)'};
-        border-radius:10px; padding:1rem 1.1rem;
-        cursor:pointer; transition:border-color 0.2s, background 0.15s;
-      "
+      style="background:var(--card);border:1px solid var(--border);border-left:3px solid ${borderColor[t.state] || 'var(--border)'};border-radius:10px;padding:1rem 1.1rem;cursor:pointer;transition:background 0.15s;"
       onmouseover="this.style.background='rgba(255,255,255,0.03)'"
       onmouseout="this.style.background='var(--card)'"
     >
-      <div style="font-family:'Bebas Neue',sans-serif;font-size:1.25rem;letter-spacing:0.04em;line-height:1.1;margin-bottom:0.45rem;">${t.name}</div>
-      <div style="margin-bottom:0.55rem;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:0.3rem;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:1.2rem;letter-spacing:0.04em;line-height:1.1;flex:1;">${t.name}</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:1rem;color:var(--muted);flex-shrink:0;margin-left:0.4rem;">#${sortedRank}</div>
+      </div>
+      <div style="margin-bottom:0.5rem;">
         <span class="team-state-badge ${stateClass(t.state)}">${t.state}</span>
       </div>
-      <div style="font-family:'Bebas Neue',sans-serif;font-size:1.5rem;color:var(--accent);line-height:1;">${Math.round(t.total).toLocaleString()}</div>
-      <div style="font-family:'DM Mono',monospace;font-size:0.62rem;color:var(--muted);margin-top:0.15rem;margin-bottom:0.4rem;">Total FC Value</div>
-      <div style="display:flex;gap:0.75rem;">
-        <div>
-          <div style="font-family:'DM Mono',monospace;font-size:0.6rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;">Overall</div>
-          <div style="font-family:'DM Mono',monospace;font-size:0.78rem;color:var(--text2);">#${t.rank} of ${rankings.length}</div>
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:1.5rem;color:var(--accent);line-height:1;">${Math.round(primaryVal).toLocaleString()}</div>
+      <div style="font-family:'DM Mono',monospace;font-size:0.6rem;color:var(--muted);margin-top:0.1rem;margin-bottom:0.6rem;">${primaryLabel}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.35rem;">
+        <div style="background:rgba(255,255,255,0.03);border-radius:5px;padding:0.3rem 0.4rem;">
+          <div style="font-family:'DM Mono',monospace;font-size:0.55rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;">OVR</div>
+          <div style="font-family:'DM Mono',monospace;font-size:0.72rem;${hlOvr}">#${t.rank}</div>
+          <div style="font-family:'DM Mono',monospace;font-size:0.6rem;color:var(--muted);">${Math.round(t.total / 1000)}k</div>
         </div>
-        <div>
-          <div style="font-family:'DM Mono',monospace;font-size:0.6rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;">Starters</div>
-          <div style="font-family:'DM Mono',monospace;font-size:0.78rem;color:var(--text2);">#${t.starterRank} of ${rankings.length}</div>
+        <div style="background:rgba(255,255,255,0.03);border-radius:5px;padding:0.3rem 0.4rem;">
+          <div style="font-family:'DM Mono',monospace;font-size:0.55rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;">STR</div>
+          <div style="font-family:'DM Mono',monospace;font-size:0.72rem;${hlStr}">#${t.starterRank}</div>
+          <div style="font-family:'DM Mono',monospace;font-size:0.6rem;color:var(--muted);">${Math.round(t.starterTotal / 1000)}k</div>
+        </div>
+        <div style="background:rgba(255,255,255,0.03);border-radius:5px;padding:0.3rem 0.4rem;">
+          <div style="font-family:'DM Mono',monospace;font-size:0.55rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;">PKS</div>
+          <div style="font-family:'DM Mono',monospace;font-size:0.72rem;${hlPks}">#${t.pickRank}</div>
+          <div style="font-family:'DM Mono',monospace;font-size:0.6rem;color:var(--muted);">${Math.round(t.pickTotal / 1000)}k</div>
         </div>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
+}
 
-  // ── SECTION 3: POWER RANKINGS ──────────────────────────────────────────────
-  const maxVal = rankings[0]?.total || 1;
-  document.getElementById('dashRankings').innerHTML = rankings.map((t, i) => {
-    const pct = Math.round((t.total / maxVal) * 100);
+let _rankSort = 'overall';
+function setRankSort(key) {
+  _rankSort = key;
+  ['Overall','Starters','Picks'].forEach(k => {
+    const el = document.getElementById('sort' + k);
+    if (el) el.classList.toggle('active-sort', k.toLowerCase() === key);
+  });
+  renderRankingsTable(key);
+}
+
+function renderRankingsTable(sortKey) {
+  const rankings = window._dashRankings;
+  if (!rankings) return;
+  const sorted = [...rankings].sort((a, b) => {
+    if (sortKey === 'starters') return b.starterTotal - a.starterTotal;
+    if (sortKey === 'picks')    return b.pickTotal   - a.pickTotal;
+    return b.total - a.total;
+  });
+  const maxOverall  = Math.max(...sorted.map(t => t.total));
+  const maxStarters = Math.max(...sorted.map(t => t.starterTotal));
+  const maxPicks    = Math.max(...sorted.map(t => t.pickTotal));
+  document.getElementById('dashRankings').innerHTML = sorted.map((t, i) => {
+    const barVal   = sortKey === 'starters' ? t.starterTotal : sortKey === 'picks' ? t.pickTotal : t.total;
+    const maxVal   = sortKey === 'starters' ? maxStarters    : sortKey === 'picks' ? maxPicks    : maxOverall;
+    const pct      = Math.round((barVal / (maxVal || 1)) * 100);
     const barColor = { Contention: 'var(--accent)', Transition: 'var(--yellow)', Rebuild: 'var(--accent2)' }[t.state] || 'var(--muted)';
+    const overallRank  = rankings.findIndex(r => r.rid === t.rid) + 1;
+    const starterRank  = t.starterRank;
+    const pickRank     = t.pickRank;
+    const highlightOvr = sortKey === 'overall'  ? 'color:var(--accent);' : '';
+    const highlightStr = sortKey === 'starters' ? 'color:var(--accent);' : '';
+    const highlightPks = sortKey === 'picks'    ? 'color:var(--accent);' : '';
     return `
     <div style="display:flex;align-items:center;gap:1rem;padding:0.7rem 1.5rem;border-bottom:1px solid rgba(37,42,56,0.5);"
       onmouseover="this.style.background='rgba(255,255,255,0.02)'"
@@ -2357,14 +2468,25 @@ function renderDashboard() {
     >
       <div style="font-family:'Bebas Neue',sans-serif;font-size:1.2rem;color:${i < 3 ? 'var(--accent)' : 'var(--muted)'};width:2rem;flex-shrink:0;">${i + 1}</div>
       <div style="flex:1;min-width:0;">
-        <div style="font-size:0.88rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${t.name}</div>
+        <div style="display:flex;align-items:baseline;gap:0.75rem;flex-wrap:wrap;">
+          <div style="font-size:0.88rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${t.name}</div>
+          <div style="display:flex;gap:0.6rem;flex-shrink:0;font-family:'DM Mono',monospace;font-size:0.6rem;">
+            <span style="color:var(--muted);${highlightOvr}">OVR <span style="color:var(--text2);${highlightOvr}">#${overallRank}</span></span>
+            <span style="color:var(--muted);${highlightStr}">STR <span style="color:var(--text2);${highlightStr}">#${starterRank}</span></span>
+            <span style="color:var(--muted);${highlightPks}">PKS <span style="color:var(--text2);${highlightPks}">#${pickRank}</span></span>
+          </div>
+        </div>
         <div style="margin-top:0.3rem;height:5px;background:var(--border);border-radius:3px;overflow:hidden;">
           <div style="height:100%;width:${pct}%;background:${barColor};border-radius:3px;transition:width 0.4s ease;"></div>
         </div>
       </div>
       <div style="text-align:right;flex-shrink:0;">
-        <div style="font-family:'Bebas Neue',sans-serif;font-size:1.1rem;color:var(--text);">${Math.round(t.total).toLocaleString()}</div>
-        <span class="team-state-badge ${stateClass(t.state)}" style="font-size:0.58rem;">${t.state}</span>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:1.05rem;color:var(--text);">${Math.round(t.total).toLocaleString()}</div>
+        <div style="font-family:'DM Mono',monospace;font-size:0.6rem;color:var(--muted);margin-top:0.1rem;">
+          STR <span style="color:var(--text2);">${Math.round(t.starterTotal).toLocaleString()}</span>
+          &nbsp;·&nbsp;PKS <span style="color:var(--text2);">${Math.round(t.pickTotal).toLocaleString()}</span>
+        </div>
+        <span class="team-state-badge ${stateClass(t.state)}" style="font-size:0.58rem;margin-top:0.2rem;display:inline-block;">${t.state}</span>
       </div>
     </div>`;
   }).join('');
