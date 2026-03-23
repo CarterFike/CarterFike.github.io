@@ -478,6 +478,23 @@
   .wav-trend-flat { color: var(--muted); }
 
 
+  .mode-toggle { display:flex; border-radius:8px; overflow:hidden; border:1px solid var(--border); flex-shrink:0; }
+  .mode-toggle-btn {
+    background: var(--surface);
+    color: var(--muted);
+    border: none;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.72rem;
+    padding: 0.38rem 0.95rem;
+    cursor: pointer;
+    transition: all 0.15s;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+  .mode-toggle-btn + .mode-toggle-btn { border-left: 1px solid var(--border); }
+  .mode-toggle-btn.active { background: var(--accent); color: #000; font-weight: 600; }
+  .mode-toggle-btn:not(.active):hover { color: var(--text); background: rgba(255,255,255,0.04); }
+
   .sort-rank-btn {
     background: var(--card);
     border: 1px solid var(--border);
@@ -533,6 +550,14 @@
   <div class="tab-panel active" id="panel-dashboard">
     <div id="dashboardContent" style="display:none;">
 
+      <!-- MODE TOGGLE -->
+      <div style="display:flex;justify-content:flex-end;margin-bottom:1.25rem;">
+        <div class="mode-toggle">
+          <button id="dashModeDynasty" class="mode-toggle-btn active" onclick="setDashboardMode('dynasty')">Dynasty</button>
+          <button id="dashModeRedraft" class="mode-toggle-btn" onclick="setDashboardMode('redraft')">Redraft</button>
+        </div>
+      </div>
+
       <!-- SECTION 1: BIGGEST MOVERS BANNER -->
       <div id="dashMovers" style="margin-bottom:1.5rem;"></div>
 
@@ -561,9 +586,9 @@
         <div class="table-header">
           <h2>Power Rankings</h2>
           <div style="display:flex;gap:0.4rem;align-items:center;">
-            <button id="sortOverall" onclick="setRankSort('overall')" class="sort-rank-btn active-sort">Overall</button>
+            <button id="sortOverall"  onclick="setRankSort('overall')"  class="sort-rank-btn active-sort">Overall</button>
             <button id="sortStarters" onclick="setRankSort('starters')" class="sort-rank-btn">Starters</button>
-            <button id="sortPicks" onclick="setRankSort('picks')" class="sort-rank-btn">Picks</button>
+            <button id="sortPicks"    onclick="setRankSort('picks')"    class="sort-rank-btn">Picks</button>
           </div>
         </div>
         <div id="dashRankings"></div>
@@ -622,6 +647,10 @@
       <div class="team-selector-card">
         <label>Select Team</label>
         <select id="teamSelect" onchange="renderTeamDetail()"></select>
+        <div class="mode-toggle" style="margin-left:auto;">
+          <button id="teamsModeDynasty" class="mode-toggle-btn active" onclick="setTeamsMode('dynasty')">Dynasty</button>
+          <button id="teamsModeRedraft" class="mode-toggle-btn" onclick="setTeamsMode('redraft')">Redraft</button>
+        </div>
       </div>
       <div id="teamDetail"></div>
     </div>
@@ -758,6 +787,7 @@
 <script>
 const BASE            = "https://api.sleeper.app/v1";
 const FC_URL          = "https://api.fantasycalc.com/values/current?isDynasty=true&numQbs=1&ppr=1&numTeams=14";
+const FC_REDRAFT_URL  = "https://api.fantasycalc.com/values/current?isDynasty=false&numQbs=1&ppr=1&numTeams=14";
 const SUPABASE_URL    = 'https://whezphfjymwyjxxmpzgx.supabase.co';
 const SUPABASE_EDGE_URL = 'https://whezphfjymwyjxxmpzgx.supabase.co/functions/v1/rapid-api';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndoZXpwaGZqeW13eWp4eG1wemd4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI4NDAyODIsImV4cCI6MjA4ODQxNjI4Mn0.ngJTXg78P4-w8pOg8nxY2T18yYAQ-fxw4CrbzW0ylQQ';
@@ -785,6 +815,7 @@ let latestSeason          = '';
 let leagueAvgStarters     = {}; // { QB, RB, WR, TE } starter FC averages
 let leagueAvgDepth        = {}; // { QB, RB, WR, TE } depth FC averages
 let fcPickValues          = {}; // "2026 Pick 1.03" → { value }
+let fcRedraftValues       = {}; // sleeperId → redraft value (win-now)
 let ownedPicksMap         = {}; // rid → [{ season, round, originalRid, slot }]
 let leagueRosterPositions = []; // e.g. ['QB','RB','WR','TE','FLEX','BN',...]
 
@@ -843,18 +874,33 @@ async function fetchFCValues() {
     const cached = cacheRows?.[0];
     if (cached?.cached_at) {
       const age = Date.now() - new Date(cached.cached_at).getTime();
-      if (age < 24 * 60 * 60 * 1000 && cached.data?.fcValues) {
-        fcValues     = cached.data.fcValues;
-        fcPickValues = cached.data.fcPickValues || {};
+      if (age < 24 * 60 * 60 * 1000 && cached.data?.fcValues && cached.data?.fcRedraftValues) {
+        fcValues        = cached.data.fcValues;
+        fcPickValues    = cached.data.fcPickValues    || {};
+        fcRedraftValues = cached.data.fcRedraftValues || {};
         console.log('FC values loaded from cache. Picks:', Object.keys(fcPickValues).slice(0, 4));
         return;
       }
     }
-    // Fetch fresh from FantasyCalc
-    const data = await fetch(FC_URL).then(r => r.json());
+    // Fetch fresh — dynasty and redraft in parallel
+    const [dynastyData, redraftData] = await Promise.all([
+      fetch(FC_URL).then(r => r.json()),
+      fetch(FC_REDRAFT_URL).then(r => r.json())
+    ]);
+
+    // Build redraft lookup: sleeperId → value
+    fcRedraftValues = {};
+    redraftData.forEach(entry => {
+      const sid = entry.player?.sleeperId;
+      if (sid && entry.player?.position !== 'PICK') {
+        fcRedraftValues[String(sid)] = entry.value || 0;
+      }
+    });
+
+    // Build dynasty values + picks
     fcValues = {};
     fcPickValues = {};
-    data.forEach(entry => {
+    dynastyData.forEach(entry => {
       const pos = entry.player?.position;
       const nm  = entry.player?.name || '';
       if (pos === 'PICK') {
@@ -875,12 +921,13 @@ async function fetchFCValues() {
     // Store in Supabase cache
     await sbUpsert('fc_cache', {
       id: 1,
-      data: { fcValues, fcPickValues },
+      data: { fcValues, fcPickValues, fcRedraftValues },
       cached_at: new Date().toISOString()
     });
   } catch (e) { console.warn('FantasyCalc fetch failed:', e.message); }
 }
 function getFCValue(pid) { return fcValues[String(pid)]?.value || 0; }
+function getFCRedraftValue(pid) { return fcRedraftValues[String(pid)] || 0; }
 
 // Map pick slot (1-N) to FC bucket label for slotted picks
 function slotToBucket(slot, numTeams) {
@@ -903,7 +950,12 @@ function getFCPickValue(season, round, slot, numTeams) {
     const padded = String(slot).padStart(2, '0');
     const key = `${season} Pick ${round}.${padded}`;
     if (fcPickValues[key]) return fcPickValues[key].value;
-    // Fallback: median of all slots for that season+round
+    // FC only goes up to pick 12 — fall back down until we find a value
+    for (let s = slot - 1; s >= 1; s--) {
+      const fallbackKey = `${season} Pick ${round}.${String(s).padStart(2, '0')}`;
+      if (fcPickValues[fallbackKey]) return fcPickValues[fallbackKey].value;
+    }
+    // Last resort: median of all slots for that season+round
     const all = Object.entries(fcPickValues)
       .filter(([k]) => k.startsWith(`${season} Pick ${round}.`))
       .map(([, v]) => v.value)
@@ -922,8 +974,8 @@ function getFCPickValue(season, round, slot, numTeams) {
 function getPickSourceAdjustment(originalRid) {
   if (!originalRid) return { multiplier: 1, rank: null, label: '— (unknown source)', dir: 'neutral' };
   // Use cached rankings if available to avoid infinite recursion
-  const rankings = window._dashRankings || window._dashRankingsGrid;
-  if (!rankings) return { multiplier: 1, rank: null, label: '— (loading...)', dir: 'neutral' };
+  // Use pick-specific rankings (always redraft, never overwritten)
+  const rankings = window._pickRankings;
   const entry = rankings.find(r => String(r.rid) === String(originalRid));
   if (!entry) return { multiplier: 1, rank: null, label: '— (unknown source)', dir: 'neutral' };
   const rank = entry.starterRank;
@@ -1084,7 +1136,7 @@ async function saveWeeklySnapshot(leagueId) {
   }
 
   const numTeams   = Object.keys(rawRosterData).length || 14;
-  const rankings   = window._dashRankings || [];
+  const rankings   = window._pickRankings || [];
   const snapshots  = {};
 
   for (const [rid, rosterObj] of Object.entries(rawRosterData)) {
@@ -1171,7 +1223,7 @@ async function loadLeague() {
 
   allTxns = []; allTrades = []; aiGradeCache = {};
   rosterState = {}; rosterSnapshotCache = {};
-  rawRosterData = {}; uidToRid = {}; ownedPicksMap = {}; fcPickValues = {};
+  rawRosterData = {}; uidToRid = {}; ownedPicksMap = {}; fcPickValues = {}; fcRedraftValues = {};
 
   try {
     setProgress(3, 'Loading player data...');
@@ -1393,7 +1445,8 @@ async function fetchPlayerStats(pid, season, tradeWeek) {
 }
 
 // ─── TEAMS PAGE ───────────────────────────────────────────────────────────────
-function computeTeamStarterValues(playerArr) {
+// Dynasty starter values — used for dashboard display default
+function computeTeamStarterValuesDynasty(playerArr) {
   const byPos = { QB: [], RB: [], WR: [], TE: [] };
   playerArr.forEach(pid => {
     const pos = playerPos(pid);
@@ -1405,6 +1458,37 @@ function computeTeamStarterValues(playerArr) {
     RB: (byPos.RB[0] || 0) + (byPos.RB[1] || 0),
     WR: (byPos.WR[0] || 0) + (byPos.WR[1] || 0) + (byPos.WR[2] || 0),
     TE: byPos.TE[0] || 0
+  };
+}
+
+// Redraft starter values — used for pick source adjustments + redraft mode
+function computeTeamStarterValues(playerArr) {
+  const byPos = { QB: [], RB: [], WR: [], TE: [] };
+  playerArr.forEach(pid => {
+    const pos = playerPos(pid);
+    if (byPos[pos] !== undefined) byPos[pos].push(getFCRedraftValue(pid));
+  });
+  Object.keys(byPos).forEach(p => byPos[p].sort((a, b) => b - a));
+  return {
+    QB: byPos.QB[0] || 0,
+    RB: (byPos.RB[0] || 0) + (byPos.RB[1] || 0),
+    WR: (byPos.WR[0] || 0) + (byPos.WR[1] || 0) + (byPos.WR[2] || 0),
+    TE: byPos.TE[0] || 0
+  };
+}
+
+function computeTeamDepthValuesRedraft(playerArr) {
+  const byPos = { QB: [], RB: [], WR: [], TE: [] };
+  playerArr.forEach(pid => {
+    const pos = playerPos(pid);
+    if (byPos[pos] !== undefined) byPos[pos].push(getFCRedraftValue(pid));
+  });
+  Object.keys(byPos).forEach(p => byPos[p].sort((a, b) => b - a));
+  return {
+    QB: byPos.QB.slice(1).reduce((s, v) => s + v, 0),
+    RB: byPos.RB.slice(2).reduce((s, v) => s + v, 0),
+    WR: byPos.WR.slice(3).reduce((s, v) => s + v, 0),
+    TE: byPos.TE.slice(1).reduce((s, v) => s + v, 0)
   };
 }
 
@@ -1428,54 +1512,71 @@ function getPickValueForRoster(rid) {
   const numTeams = Object.keys(rawRosterData).length || 14;
   return (ownedPicksMap[rid] || []).reduce((s, p) => s + getAdjustedPickValue(p, numTeams).value, 0);
 }
-function computeAllTeamRankings() {
-  const numTeams = Object.keys(rawRosterData).length || 14;
+function computeAllTeamRankings(mode = 'dynasty') {
+  const numTeams   = Object.keys(rawRosterData).length || 14;
+  const useRedraft = mode === 'redraft';
 
-  // ── PASS 1: build teams with player values + unadjusted pick values ─────────
+  // ── PASS 1: build teams with both dynasty and redraft values ─────────────────
   const teams = [];
   for (const [rid, rosterObj] of Object.entries(rawRosterData)) {
-    const players  = (rosterObj.players || []).map(String);
-    const playerVal = players.reduce((s, pid) => s + getFCValue(pid), 0);
-    // Unadjusted picks (slot-based exact, unslotted uses base FC median)
-    const rawPickVal = (ownedPicksMap[rid] || []).reduce((s, p) => s + getFCPickValue(p.season, p.round, p.slot, numTeams), 0);
-    const sv       = computeTeamStarterValues(players);
-    const dv       = computeTeamDepthValues(players);
-    const starterTotal = sv.QB + sv.RB + sv.WR + sv.TE;
-    const uid      = rosterObj.owner_id;
-    teams.push({ rid, uid, name: allManagers[uid] || `Roster ${rid}`, playerVal, rawPickVal, sv, dv, starterTotal });
+    const players          = (rosterObj.players || []).map(String);
+    const playerValDynasty = players.reduce((s, pid) => s + getFCValue(pid),         0);
+    const playerValRedraft = players.reduce((s, pid) => s + getFCRedraftValue(pid),   0);
+    const playerVal        = useRedraft ? playerValRedraft : playerValDynasty;
+    const rawPickVal       = (ownedPicksMap[rid] || []).reduce((s, p) => s + getFCPickValue(p.season, p.round, p.slot, numTeams), 0);
+    const svDynasty        = computeTeamStarterValuesDynasty(players);
+    const svRedraft        = computeTeamStarterValues(players);
+    const dvDynasty        = computeTeamDepthValues(players);
+    const dvRedraft        = computeTeamDepthValuesRedraft(players);
+    const starterTotalDynasty = svDynasty.QB + svDynasty.RB + svDynasty.WR + svDynasty.TE;
+    const starterTotalRedraft = svRedraft.QB + svRedraft.RB + svRedraft.WR + svRedraft.TE;
+    const uid = rosterObj.owner_id;
+    teams.push({ rid, uid, name: allManagers[uid] || `Roster ${rid}`,
+      playerVal, playerValDynasty, playerValRedraft, rawPickVal,
+      svDynasty, svRedraft, dvDynasty, dvRedraft,
+      starterTotalDynasty, starterTotalRedraft
+    });
   }
 
-  // Establish starter rankings from pass 1 so pick adjustments can use them
-  const byStarter1 = [...teams].sort((a, b) => b.starterTotal - a.starterTotal);
-  byStarter1.forEach((t, i) => { t.starterRank = i + 1; });
+  // Pick adjustments — always use redraft starter ranks regardless of mode
+  const byStarterRedraft = [...teams].sort((a, b) => b.starterTotalRedraft - a.starterTotalRedraft);
+  byStarterRedraft.forEach((t, i) => { t.starterRankRedraft = i + 1; });
+  window._pickRankings = teams.map(t => ({ rid: t.rid, starterRank: t.starterRankRedraft }));
 
-  // Cache a minimal rankings array so getPickSourceAdjustment can resolve ranks
-  window._dashRankings = teams.map(t => ({ rid: t.rid, rank: 0, starterRank: t.starterRank }));
-
-  // ── PASS 2: recompute pick totals with source adjustments ────────────────────
+  // ── PASS 2: pick totals with source adjustments ───────────────────────────────
   teams.forEach(t => {
     t.pickTotal = (ownedPicksMap[t.rid] || []).reduce((s, p) => s + getAdjustedPickValue(p, numTeams).value, 0);
-    t.total = t.playerVal + t.pickTotal;
+    t.total     = t.playerVal + t.pickTotal;
   });
 
-  // Final overall sort
+  // Final sort by total (mode-aware)
   teams.sort((a, b) => b.total - a.total);
   teams.forEach((t, i) => {
     t.rank  = i + 1;
     t.state = i < 4 ? 'Contention' : i < 10 ? 'Transition' : 'Rebuild';
   });
-  // Starter rank
-  const byStarter = [...teams].sort((a, b) => b.starterTotal - a.starterTotal);
+
+  // Starter rank for display (mode-aware)
+  const svSortKey = useRedraft ? 'starterTotalRedraft' : 'starterTotalDynasty';
+  const byStarter = [...teams].sort((a, b) => b[svSortKey] - a[svSortKey]);
   byStarter.forEach((t, i) => { t.starterRank = i + 1; });
+
   // Pick rank
   const byPicks = [...teams].sort((a, b) => b.pickTotal - a.pickTotal);
   byPicks.forEach((t, i) => { t.pickRank = i + 1; });
-  // League averages — starters
+
+  // Set mode-aware display values on each team
+  teams.forEach(t => {
+    t.sv           = useRedraft ? t.svRedraft  : t.svDynasty;
+    t.dv           = useRedraft ? t.dvRedraft  : t.dvDynasty;
+    t.starterTotal = useRedraft ? t.starterTotalRedraft : t.starterTotalDynasty;
+  });
+
+  // League averages — mode-aware
   const n = teams.length || 1;
   leagueAvgStarters = { QB: 0, RB: 0, WR: 0, TE: 0 };
   teams.forEach(t => ['QB','RB','WR','TE'].forEach(p => { leagueAvgStarters[p] += t.sv[p]; }));
   ['QB','RB','WR','TE'].forEach(p => { leagueAvgStarters[p] = Math.round(leagueAvgStarters[p] / n); });
-  // League averages — depth
   leagueAvgDepth = { QB: 0, RB: 0, WR: 0, TE: 0 };
   teams.forEach(t => ['QB','RB','WR','TE'].forEach(p => { leagueAvgDepth[p] += t.dv[p]; }));
   ['QB','RB','WR','TE'].forEach(p => { leagueAvgDepth[p] = Math.round(leagueAvgDepth[p] / n); });
@@ -1488,7 +1589,7 @@ function teamStateBadge(state) {
 }
 
 function populateTeamSelector() {
-  const rankings = computeAllTeamRankings();
+  const rankings = computeAllTeamRankings(teamsMode);
   const sel = document.getElementById('teamSelect');
   sel.innerHTML = rankings.map(t =>
     `<option value="${t.rid}">${t.name} — ${t.state} (#${t.rank})</option>`
@@ -1500,11 +1601,13 @@ async function renderTeamDetail() {
   const rid = document.getElementById('teamSelect').value;
   if (!rid) return;
 
-  const rankings = computeAllTeamRankings();
+  const rankings = computeAllTeamRankings(teamsMode);
   const team = rankings.find(t => t.rid === rid);
   if (!team) return;
 
-  const totalFC = (rawRosterData[rid]?.players || []).reduce((s, pid) => s + getFCValue(pid), 0) + getPickValueForRoster(rid);
+  const getVal  = teamsMode === 'redraft' ? getFCRedraftValue : getFCValue;
+  const totalFC = (rawRosterData[rid]?.players || []).reduce((s, pid) => s + getVal(pid), 0) + getPickValueForRoster(rid);
+  const modeLabel = teamsMode === 'redraft' ? 'Redraft' : 'Dynasty';
 
   document.getElementById('teamDetail').innerHTML = `
     <div class="team-header-card">
@@ -1516,7 +1619,7 @@ async function renderTeamDetail() {
         </div>
       </div>
       <div class="team-header-right">
-        <div class="team-total-label">Total FC Value</div>
+        <div class="team-total-label">Total FC Value (${modeLabel})</div>
         <div class="team-total-value">${Math.round(totalFC).toLocaleString()}</div>
         <div style="font-family:'DM Mono',monospace;font-size:0.7rem;color:var(--muted);margin-top:0.3rem;">
           Starter Rank <span style="color:var(--text2);">#${team.starterRank} of ${rankings.length}</span>
@@ -1524,7 +1627,7 @@ async function renderTeamDetail() {
         </div>
       </div>
     </div>
-    ${buildStrengthGrid(team.sv, team.dv, rankings)}
+    ${buildStrengthGrid(team.sv, team.dv, rankings, teamsMode)}
     <div class="table-wrap">
       <div class="table-header">
         <h2>Roster</h2>
@@ -1567,8 +1670,9 @@ function buildBar(teamVal, avgVal, maxVal, label) {
   </div>`;
 }
 
-function buildStrengthGrid(sv, dv, rankings) {
+function buildStrengthGrid(sv, dv, rankings, mode) {
   const posLabel    = { QB: 'QB1', RB: 'Top 2 RBs', WR: 'Top 3 WRs', TE: 'TE1' };
+  const starterLabel = (mode === 'redraft') ? 'Starters (redraft)' : 'Starters (dynasty)';
   return `<div class="strength-grid">${['QB','RB','WR','TE'].map(pos => {
     const maxStarter = Math.max(...rankings.map(t => t.sv[pos] || 0), leagueAvgStarters[pos] || 0) * 1.08 || 1;
     const maxDepth   = Math.max(...rankings.map(t => t.dv[pos] || 0), leagueAvgDepth[pos]    || 0) * 1.08 || 1;
@@ -1577,7 +1681,7 @@ function buildStrengthGrid(sv, dv, rankings) {
         <span class="strength-pos-label">${pos}</span>
         <span style="font-family:'DM Mono',monospace;font-size:0.65rem;color:var(--muted);">${posLabel[pos]}</span>
       </div>
-      ${buildBar(sv[pos] || 0, leagueAvgStarters[pos] || 0, maxStarter, 'Starters')}
+      ${buildBar(sv[pos] || 0, leagueAvgStarters[pos] || 0, maxStarter, starterLabel)}
       ${buildBar(dv[pos] || 0, leagueAvgDepth[pos]    || 0, maxDepth,   'Depth')}
     </div>`;
   }).join('')}</div>`;
@@ -1634,12 +1738,12 @@ async function fetchOwnedPicks(leagueId) {
       // Build uid→slot from draft_order
       const uidToSlot = rookieDraft.draft_order; // { uid: slot }
       // For each rid that has a 2026 pick originally theirs, assign slot
+      const numTeamsInDraft = Object.keys(rawRosterData).length || 14;
       rids.forEach(rid => {
         const rosterObj = rawRosterData[rid];
         const uid = rosterObj?.owner_id;
         const slot = uid && uidToSlot[uid] ? uidToSlot[uid] : null;
-        if (!slot) return;
-        // Assign slot to ALL picks in this season that have originalRid === rid
+        if (!slot) return;        // Assign slot to ALL picks in this season that have originalRid === rid
         // (covers both own pick and picks this team received via trade)
         Object.values(ownedPicksMap).forEach(picks => {
           picks.forEach(p => {
@@ -1667,15 +1771,16 @@ function buildRosterTableHTML(sleeperRoster, allPids, statsMap, rid) {
   }).filter(Boolean);
 
   // ── Bench: sorted by FC value desc (excludes starters, IR, taxi)
+  const _sortVal = (pid) => (teamsMode === 'redraft') ? getFCRedraftValue(pid) : getFCValue(pid);
   const benchPids = allPids
     .filter(p => !starterSet.has(p) && !reserveSet.has(p) && !taxiSet.has(p))
-    .sort((a, b) => getFCValue(b) - getFCValue(a));
+    .sort((a, b) => _sortVal(b) - _sortVal(a));
 
   // ── Taxi: sorted by FC value desc
-  const taxiPids = allPids.filter(p => taxiSet.has(p)).sort((a, b) => getFCValue(b) - getFCValue(a));
+  const taxiPids = allPids.filter(p => taxiSet.has(p)).sort((a, b) => _sortVal(b) - _sortVal(a));
 
   // ── IR: sorted by FC value desc
-  const irPids = allPids.filter(p => reserveSet.has(p)).sort((a, b) => getFCValue(b) - getFCValue(a));
+  const irPids = allPids.filter(p => reserveSet.has(p)).sort((a, b) => _sortVal(b) - _sortVal(a));
 
   // ── Picks owned by this roster
   const picks = (ownedPicksMap[rid] || [])
@@ -1691,7 +1796,7 @@ function buildRosterTableHTML(sleeperRoster, allPids, statsMap, rid) {
     const pos     = playerPos(pid) || '—';
     const nflTeam = playerTeam(pid) || '—';
     const age     = playerAge(pid);
-    const fcVal   = getFCValue(pid);
+    const fcVal   = (teamsMode === 'redraft') ? getFCRedraftValue(pid) : getFCValue(pid);
     const stats   = statsMap[pid];
     const posCls  = ['QB','RB','WR','TE','K','DEF'].includes(pos) ? `pos-${pos}` : 'pos-other';
     const fcClass = fcVal > 5000 ? 'high' : fcVal > 1000 ? 'mid' : 'low';
@@ -1773,7 +1878,7 @@ function buildRosterTableHTML(sleeperRoster, allPids, statsMap, rid) {
     picks.forEach(pick => {
       const roundNames = { 1: '1st', 2: '2nd', 3: '3rd' };
       const rndStr  = roundNames[pick.round] || `${pick.round}th`;
-      const slotStr = pick.slot ? `Pick ${pick.slot} (${slotToBucket(pick.slot, numTeams)})` : 'TBD';
+      const slotStr = pick.slot ? `Pick ${pick.slot}` : 'TBD';
       const label   = `${pick.season} ${rndStr} Round — ${slotStr}`;
       const { value: fcVal, adj } = getAdjustedPickValue(pick, numTeams);
       const fcClass = fcVal > 5000 ? 'high' : fcVal > 1000 ? 'mid' : 'low';
@@ -2422,7 +2527,7 @@ function renderWaivers() {
 function renderDashboard() {
   if (!Object.keys(rawRosterData).length) return;
 
-  const rankings = computeAllTeamRankings();
+  const rankings = computeAllTeamRankings(dashboardMode);
   const top      = rankings[0];
   const bottom   = rankings[rankings.length - 1];
 
@@ -2504,6 +2609,27 @@ function renderDashboard() {
 }
 
 let _gridSort = 'overall';
+let dashboardMode = 'dynasty'; // 'dynasty' | 'redraft'
+let teamsMode     = 'dynasty'; // 'dynasty' | 'redraft'
+
+function setDashboardMode(mode) {
+  dashboardMode = mode;
+  ['Dynasty','Redraft'].forEach(m => {
+    const el = document.getElementById('dashMode' + m);
+    if (el) el.classList.toggle('active', m.toLowerCase() === mode);
+  });
+  renderDashboard();
+}
+
+function setTeamsMode(mode) {
+  teamsMode = mode;
+  ['Dynasty','Redraft'].forEach(m => {
+    const el = document.getElementById('teamsMode' + m);
+    if (el) el.classList.toggle('active', m.toLowerCase() === mode);
+  });
+  renderTeamDetail();
+}
+
 function setGridSort(key) {
   _gridSort = key;
   ['Overall','Starters','Picks'].forEach(k => {
