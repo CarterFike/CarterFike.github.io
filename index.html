@@ -1193,6 +1193,48 @@ async function saveWeeklySnapshot(leagueId) {
   } catch (e) {
     console.warn('[Weekly Snapshot] Save failed:', e);
   }
+
+  // ── FC VALUE HISTORY ────────────────────────────────────────────────────────
+  // Write a lean daily record for historical ranking charts
+  try {
+    const today = new Date();
+    const snapshotDate = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+
+    // Check if already recorded today
+    const existing = await sbSelect('fc_value_history', `league_id=eq.${leagueId}&snapshot_date=eq.${snapshotDate}`);
+    if (existing?.length) {
+      console.log(`[FC History] Already recorded for ${snapshotDate}`);
+      return;
+    }
+
+    // Build lean snapshots from window._dashRankings (dynasty mode rankings)
+    const histRankings = window._dashRankings || [];
+    const histSnapshots = {};
+    histRankings.forEach(t => {
+      histSnapshots[t.rid] = {
+        uid:          t.uid,
+        name:         t.name,
+        total:        Math.round(t.total),
+        starterTotal: Math.round(t.starterTotal),
+        pickTotal:    Math.round(t.pickTotal),
+        rank:         t.rank,
+        starterRank:  t.starterRank,
+        pickRank:     t.pickRank,
+        state:        t.state
+      };
+    });
+
+    await sbUpsert('fc_value_history', {
+      id:            crypto.randomUUID(),
+      league_id:     leagueId,
+      snapshot_date: snapshotDate,
+      snapshots:     histSnapshots,
+      created_at:    new Date().toISOString()
+    });
+    console.log(`[FC History] Saved for ${snapshotDate} — ${Object.keys(histSnapshots).length} teams`);
+  } catch (e) {
+    console.warn('[FC History] Save failed:', e);
+  }
 }
 
 async function storeCurrentRosters(leagueId, ridToUid) {
